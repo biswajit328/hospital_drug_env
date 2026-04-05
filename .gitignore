@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+outputs/
+*.egg-info/
+code_dump.txt
+full_project_dump.txt

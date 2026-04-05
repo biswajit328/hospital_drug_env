@@ -1,0 +1,6 @@
+name: hospital_drug_env
+version: "1.0.0"
+description: >
+  Hospital drug shortage environment. Agent allocates scarce medicines
+  across hospital wards over multiple days. Graded on patient outcomes.
+app: server.app:app
