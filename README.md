@@ -339,6 +339,21 @@ pip install git+https://huggingface.co/spaces/biswajit328/hospital-drug-env
 python grader.py --difficulty all --seed 42
 ```
 
+## Running Demo
+```bash
+python demo.py
+```
+
+The demo script:
+
+- resets the environment with deterministic seeds
+- runs sample actions end-to-end across the task suite
+- prints observations, rewards, done flags, and final normalized scores
+- gives reviewers a one-command proof that the environment works
+
+Note: `demo.py` is a reviewer-friendly proof run. For the official deterministic benchmark,
+use `grader.py`, which averages fixed seeds and reports task scores in the `0.0-1.0` range.
+
 ## Running Inference
 ```bash
 python inference.py
