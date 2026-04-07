@@ -17,9 +17,9 @@ except ModuleNotFoundError:
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 SPACE_URL = os.getenv("SPACE_URL")
+DEFAULT_SPACE_URL = "https://biswajit328-hospital-drug-env.hf.space"
 DIFFICULTY = os.getenv("DIFFICULTY", "medium")
 TASK_NAME = os.getenv("TASK_NAME", DIFFICULTY)
 BENCHMARK = os.getenv("BENCHMARK", "hospital_drug_env")
@@ -280,9 +280,7 @@ def build_sync_env():
     if SPACE_URL:
         return HospitalDrugEnv(base_url=SPACE_URL).sync()
 
-    raise ValueError(
-        "Set either LOCAL_IMAGE_NAME/IMAGE_NAME or SPACE_URL for inference.py"
-    )
+    return HospitalDrugEnv(base_url=DEFAULT_SPACE_URL).sync()
 
 
 def call_with_retry(func, *, label: str):
@@ -303,7 +301,14 @@ def call_with_retry(func, *, label: str):
     raise last_error
 
 def main():
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN) if HF_TOKEN else None
+    client = None
+    try:
+        client = OpenAI(
+            base_url=os.environ["API_BASE_URL"],
+            api_key=os.environ["API_KEY"],
+        )
+    except KeyError:
+        client = None
 
     rewards: List[float] = []
     steps_taken = 0
@@ -330,7 +335,7 @@ def main():
 
                 try:
                     if client is None:
-                        raise RuntimeError("HF_TOKEN not configured")
+                        raise RuntimeError("API_KEY not configured")
                     completion = client.chat.completions.create(
                         model=MODEL_NAME,
                         messages=[
