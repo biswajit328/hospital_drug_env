@@ -18,12 +18,13 @@ except ModuleNotFoundError:
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 SPACE_URL = os.getenv("SPACE_URL")
 DEFAULT_SPACE_URL = "https://biswajit328-hospital-drug-env.hf.space"
 DIFFICULTY = os.getenv("DIFFICULTY", "medium")
 TASK_NAME = os.getenv("TASK_NAME", DIFFICULTY)
 BENCHMARK = os.getenv("BENCHMARK", "hospital_drug_env")
-MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))
+MAX_STEPS = max(1, int(os.getenv("MAX_STEPS", "10")))
 TEMPERATURE = 0.2
 MAX_TOKENS = 450
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.10"))
@@ -73,6 +74,8 @@ Strategy:
   - morphine -> tramadol
 - Substitutions reduce side effects but have a penalty
 """
+
+PROXY_HEALTHCHECK_PROMPT = "Reply with OK."
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -272,6 +275,26 @@ def parse_action(response_text: str, observation) -> DrugShortageAction:
     return fallback_action(observation)
 
 
+def request_model_response(
+    client: OpenAI,
+    user_content: str,
+    *,
+    system_prompt: str = SYSTEM_PROMPT,
+    temperature: float = TEMPERATURE,
+    max_tokens: int = MAX_TOKENS,
+) -> str:
+    completion = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return completion.choices[0].message.content or ""
+
+
 def build_sync_env():
     if LOCAL_IMAGE_NAME:
         async_client = asyncio.run(HospitalDrugEnv.from_docker_image(LOCAL_IMAGE_NAME))
@@ -301,15 +324,6 @@ def call_with_retry(func, *, label: str):
     raise last_error
 
 def main():
-    client = None
-    try:
-        client = OpenAI(
-            base_url=os.environ["API_BASE_URL"],
-            api_key=os.environ["API_KEY"],
-        )
-    except KeyError:
-        client = None
-
     rewards: List[float] = []
     steps_taken = 0
     success = False
@@ -317,6 +331,19 @@ def main():
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
     try:
+        if HF_TOKEN is None:
+            raise ValueError("HF_TOKEN or API_KEY environment variable is required")
+        client = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=HF_TOKEN,
+        )
+        request_model_response(
+            client,
+            PROXY_HEALTHCHECK_PROMPT,
+            system_prompt="You are validating connectivity. Reply with OK only.",
+            temperature=0.0,
+            max_tokens=8,
+        )
         env = build_sync_env()
         with env as e:
             stage = "reset"
@@ -332,22 +359,7 @@ def main():
 
                 stage = f"model step {step}"
                 user_content = format_observation(observation, step)
-
-                try:
-                    if client is None:
-                        raise RuntimeError("API_KEY not configured")
-                    completion = client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_content},
-                        ],
-                        temperature=TEMPERATURE,
-                        max_tokens=MAX_TOKENS,
-                    )
-                    response_text = completion.choices[0].message.content or ""
-                except Exception:
-                    response_text = "{}"
+                response_text = request_model_response(client, user_content)
 
                 action = parse_action(response_text, observation)
                 stage = f"env step {step}"

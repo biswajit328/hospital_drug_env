@@ -329,7 +329,7 @@ pip install git+https://huggingface.co/spaces/biswajit328/hospital-drug-env
 |----------|-------------|
 | API_BASE_URL | LLM API endpoint |
 | MODEL_NAME | Model identifier |
-| API_KEY | LiteLLM / HuggingFace API key used by `inference.py` |
+| HF_TOKEN / API_KEY | LiteLLM proxy key used by `inference.py` |
 | SPACE_URL | Running environment URL |
 | LOCAL_IMAGE_NAME / IMAGE_NAME | Optional local Docker image for offline inference runs |
 | DIFFICULTY | Task difficulty for `inference.py` |
@@ -361,10 +361,11 @@ python inference.py
 
 The baseline script:
 
-- uses the OpenAI client with `API_BASE_URL`, `MODEL_NAME`, and `API_KEY`
+- uses the OpenAI client with `API_BASE_URL`, `MODEL_NAME`, and the injected `HF_TOKEN` / `API_KEY`
+- performs a startup connectivity check through the injected LiteLLM/OpenAI-compatible proxy before stepping the environment
 - can target either a live Space via `SPACE_URL` or a local image via `LOCAL_IMAGE_NAME`
 - emits structured stdout logs with `[START]`, `[STEP]`, and `[END]` markers for validator-friendly parsing
-- falls back to a deterministic heuristic planner if the model call fails, ensuring the baseline still produces meaningful actions and scores
+- falls back to a deterministic heuristic planner only when the model returns malformed action JSON
 
 ## Built With
 
