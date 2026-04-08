@@ -76,6 +76,35 @@ TASKS = {
 
 MIN_VALID_SCORE = 0.05
 MAX_VALID_SCORE = 0.95
+TASK_MAX_STEPS = {
+    "easy": 5,
+    "medium": 7,
+    "hard": 10,
+}
+TASK_SUCCESS_THRESHOLDS = {
+    "easy": 0.85,
+    "medium": 0.70,
+    "hard": 0.45,
+}
+
+
+def list_task_metadata() -> List[dict]:
+    tasks: List[dict] = []
+    for task_id, config in TASKS.items():
+        tasks.append(
+            {
+                "id": task_id,
+                "name": config.name,
+                "difficulty": config.difficulty,
+                "description": config.objective,
+                "policy_style": config.policy_style,
+                "max_steps": TASK_MAX_STEPS[task_id],
+                "success_threshold": TASK_SUCCESS_THRESHOLDS[task_id],
+                "grader": True,
+                "has_grader": True,
+            }
+        )
+    return tasks
 
 
 def print_task_header(config: TaskConfig, seed: int) -> None:

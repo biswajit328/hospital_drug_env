@@ -1,6 +1,38 @@
+spec_version: 1
 name: hospital_drug_env
 version: "1.0.0"
 description: >
   Hospital drug shortage environment. Agent allocates scarce medicines
   across hospital wards over multiple days. Graded on patient outcomes.
+type: space
+runtime: fastapi
 app: server.app:app
+port: 8000
+tasks:
+  - id: easy
+    name: Critical Care Stabilization
+    difficulty: easy
+    description: >
+      Maintain high service levels when supplies are mostly reliable by
+      routing inventory to the highest-severity patients first.
+    max_steps: 5
+    success_threshold: 0.85
+    grader: true
+  - id: medium
+    name: Budget-Constrained Ward Balancing
+    difficulty: medium
+    description: >
+      Balance medium-term patient outcomes with budget discipline, using
+      targeted emergency orders only when high-severity shortages remain.
+    max_steps: 7
+    success_threshold: 0.70
+    grader: true
+  - id: hard
+    name: Substitution-Aware Surge Response
+    difficulty: hard
+    description: >
+      Handle prolonged scarcity by combining severity-first allocation,
+      selective emergency procurement, and clinically valid substitutions.
+    max_steps: 10
+    success_threshold: 0.45
+    grader: true

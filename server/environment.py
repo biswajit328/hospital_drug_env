@@ -281,8 +281,18 @@ class HospitalDrugEnvironment(Environment):
         self._event_type: str | None = None
         self._event_applied = False
 
-    def reset(self, seed=None, episode_id=None, difficulty="medium", **kwargs) -> DrugShortageObservation:
+    def reset(
+        self,
+        seed=None,
+        episode_id=None,
+        difficulty="medium",
+        task_id=None,
+        **kwargs,
+    ) -> DrugShortageObservation:
         self._rng = random.Random(seed)
+
+        if task_id in DIFFICULTY_SETTINGS:
+            difficulty = task_id
 
         self._difficulty = difficulty if difficulty in DIFFICULTY_SETTINGS else "medium"
         self._settings = DIFFICULTY_SETTINGS[self._difficulty]
