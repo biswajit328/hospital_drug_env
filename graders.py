@@ -21,6 +21,16 @@ from grader import (
 
 # Expose a raw task list at module scope for simple validators.
 TASKS = list_task_metadata()
+GRADERS = {
+    "easy": grade_easy,
+    "medium": grade_medium,
+    "hard": grade_hard,
+}
+
+# Extra conventional aliases for simplistic validator lookups.
+grade_task_easy = grade_easy
+grade_task_medium = grade_medium
+grade_task_hard = grade_hard
 
 
 def list_tasks() -> list[dict]:
@@ -28,7 +38,7 @@ def list_tasks() -> list[dict]:
 
 
 def grade_task(task_id: str, seed: int = 42) -> float:
-    return run_task_score(GRADER_TASKS[task_id], base_seed=seed)
+    return GRADERS[task_id](seed=seed)
 
 
 def score_all_tasks(seed: int = 42) -> dict[str, float]:
