@@ -9,6 +9,7 @@ from .grader import (
     run_task_score,
 )
 from .models import DrugShortageAction, DrugShortageObservation, DrugShortageState
+from .tasks import list_tasks, score_all_tasks, score_task
 
 __all__ = [
     "HospitalDrugEnv",
@@ -22,4 +23,7 @@ __all__ = [
     "grade_easy",
     "grade_medium",
     "grade_hard",
+    "list_tasks",
+    "score_task",
+    "score_all_tasks",
 ]

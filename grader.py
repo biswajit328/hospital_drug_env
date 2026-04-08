@@ -1,6 +1,7 @@
 # grader.py
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -111,12 +112,13 @@ def list_task_metadata() -> List[dict]:
     return tasks
 
 
-def print_task_header(config: TaskConfig, seed: int) -> None:
-    print(f"Task: {config.name}")
-    print(f"Difficulty: {config.difficulty}")
-    print(f"Objective: {config.objective}")
-    print(f"Policy style: {config.policy_style}")
-    print(f"Deterministic seeds: [{seed}, {seed + 1}]")
+def print_task_header(config: TaskConfig, seed: int, *, stream=None) -> None:
+    stream = stream or sys.stderr
+    print(f"Task: {config.name}", file=stream)
+    print(f"Difficulty: {config.difficulty}", file=stream)
+    print(f"Objective: {config.objective}", file=stream)
+    print(f"Policy style: {config.policy_style}", file=stream)
+    print(f"Deterministic seeds: [{seed}, {seed + 1}]", file=stream)
 
 
 def collect_patient_needs(observation) -> List[dict]:
@@ -352,47 +354,60 @@ def run_task_score(config: TaskConfig, base_seed: int = 42) -> float:
     return clamp_validator_safe_score(score)
 
 
-def grade_easy(seed: int = 42) -> float:
+def grade_easy(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 1 - Critical Care Stabilization."""
     config = TASKS["easy"]
     score = run_task_score(config, base_seed=seed)
-    print_task_header(config, seed)
-    print(f"Score: {score:.3f}")
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
     return score
 
 
-def grade_medium(seed: int = 42) -> float:
+def grade_medium(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 2 - Budget-Constrained Ward Balancing."""
     config = TASKS["medium"]
     score = run_task_score(config, base_seed=seed)
-    print_task_header(config, seed)
-    print(f"Score: {score:.3f}")
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
     return score
 
 
-def grade_hard(seed: int = 42) -> float:
+def grade_hard(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 3 - Substitution-Aware Surge Response."""
     config = TASKS["hard"]
     score = run_task_score(config, base_seed=seed)
-    print_task_header(config, seed)
-    print(f"Score: {score:.3f}")
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
     return score
 
 
-def run_all_graders(seed: int = 42) -> dict:
+def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> dict:
     """Run all 3 graders and return named task scores."""
-    print("Running all graders...")
-    print("-" * 60)
+    stream = stream or sys.stderr
+    if verbose:
+        print("Running all graders...", file=stream)
+        print("-" * 60, file=stream)
 
     results = {
-        "easy": grade_easy(seed=seed),
-        "medium": grade_medium(seed=seed),
-        "hard": grade_hard(seed=seed),
+        "easy": grade_easy(seed=seed, verbose=verbose, stream=stream),
+        "medium": grade_medium(seed=seed, verbose=verbose, stream=stream),
+        "hard": grade_hard(seed=seed, verbose=verbose, stream=stream),
     }
 
-    print("-" * 60)
-    print(f"Average score: {sum(results.values()) / len(results):.3f}")
-    print("All scores strictly in (0.0, 1.0):", all(0.0 < v < 1.0 for v in results.values()))
+    if verbose:
+        print("-" * 60, file=stream)
+        print(f"Average score: {sum(results.values()) / len(results):.3f}", file=stream)
+        print(
+            "All scores strictly in (0.0, 1.0):",
+            all(0.0 < v < 1.0 for v in results.values()),
+            file=stream,
+        )
     return results
 
 
@@ -404,14 +419,20 @@ if __name__ == "__main__":
         default="all",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print human-readable grader commentary to stderr.",
+    )
     args = parser.parse_args()
 
     if args.difficulty == "all":
-        results = run_all_graders(seed=args.seed)
+        results = run_all_graders(seed=args.seed, verbose=args.verbose)
     else:
         config = TASKS[args.difficulty]
         results = {args.difficulty: run_task_score(config, base_seed=args.seed)}
-        print_task_header(config, args.seed)
-        print(f"Score: {results[args.difficulty]:.3f}")
+        if args.verbose:
+            print_task_header(config, args.seed)
+            print(f"Score: {results[args.difficulty]:.3f}", file=sys.stderr)
 
     print(json.dumps(results, indent=2, sort_keys=True))
