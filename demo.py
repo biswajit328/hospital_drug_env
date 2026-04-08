@@ -20,7 +20,13 @@ try:
 except ModuleNotFoundError:
     from server.environment import HospitalDrugEnvironment
 
-from grader import TASKS, TaskConfig, build_action
+from grader import (
+    MAX_VALID_SCORE,
+    MIN_VALID_SCORE,
+    TASKS,
+    TaskConfig,
+    build_action,
+)
 
 
 def inventory_snapshot(inventory: dict[str, int]) -> str:
@@ -61,6 +67,12 @@ def print_header(title: str) -> None:
     print("-" * 80)
     print(title)
     print("-" * 80)
+
+
+def clamp_task_score(score: float | None) -> float | None:
+    if score is None:
+        return None
+    return round(min(MAX_VALID_SCORE, max(MIN_VALID_SCORE, float(score))), 3)
 
 
 def run_demo_episode(config: TaskConfig, seed: int, max_steps: int | None) -> float | None:
@@ -108,8 +120,9 @@ def run_demo_episode(config: TaskConfig, seed: int, max_steps: int | None) -> fl
 
         observation = next_observation
 
-    print(f"\nFinal normalized score for {config.difficulty}: {observation.reward:.3f}")
-    return float(observation.reward) if observation.reward is not None else None
+    final_score = clamp_task_score(observation.reward)
+    print(f"\nFinal normalized score for {config.difficulty}: {final_score:.3f}")
+    return final_score
 
 
 def difficulties_to_run(choice: str) -> Iterable[str]:
