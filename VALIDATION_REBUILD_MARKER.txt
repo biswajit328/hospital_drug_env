@@ -1,0 +1,3 @@
+Validation rebuild marker
+Commit this file only to force a fresh GitHub + Hugging Face Space rebuild.
+It does not affect runtime behavior.
