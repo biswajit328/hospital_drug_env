@@ -13,6 +13,8 @@ This script:
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from typing import Iterable
 
 try:
@@ -66,10 +68,11 @@ def action_snapshot(action) -> str:
     )
 
 
-def print_header(title: str) -> None:
-    print("-" * 80)
-    print(title)
-    print("-" * 80)
+def print_header(title: str, *, stream=None) -> None:
+    stream = stream or sys.stderr
+    print("-" * 80, file=stream)
+    print(title, file=stream)
+    print("-" * 80, file=stream)
 
 
 def clamp_task_score(score: float | None) -> float | None:
@@ -86,29 +89,31 @@ def run_demo_episode(
     max_steps: int | None,
     *,
     verbose: bool,
+    stream=None,
 ) -> float | None:
+    stream = stream or sys.stderr
     env = HospitalDrugEnvironment()
     observation = env.reset(difficulty=config.difficulty, seed=seed)
 
-    print_header(f"Task: {config.name} ({config.difficulty})")
-    print(f"Objective: {config.objective}")
-    print(f"Policy style: {config.policy_style}")
     if verbose:
+        print_header(f"Task: {config.name} ({config.difficulty})", stream=stream)
+        print(f"Objective: {config.objective}", file=stream)
+        print(f"Policy style: {config.policy_style}", file=stream)
         print(
             f"Reset complete -> day={observation.day}, "
             f"budget={observation.budget_remaining}, "
-            f"total_score={observation.total_score:.3f}"
+            f"total_score={observation.total_score:.3f}",
+            file=stream,
         )
-        print(f"Initial inventory: {inventory_snapshot(observation.inventory)}")
-        print(f"Sample wards: {ward_snapshot(observation.wards)}")
-        print(f"Initial message: {observation.message}")
-    else:
-        print("Mode: concise reviewer summary")
+        print(f"Initial inventory: {inventory_snapshot(observation.inventory)}", file=stream)
+        print(f"Sample wards: {ward_snapshot(observation.wards)}", file=stream)
+        print(f"Initial message: {observation.message}", file=stream)
 
     step_num = 0
     while not observation.done:
         if max_steps is not None and step_num >= max_steps:
-            print(f"Stopped early after {step_num} steps (demo limit).")
+            if verbose:
+                print(f"Stopped early after {step_num} steps (demo limit).", file=stream)
             return None
 
         action = build_action(observation, config)
@@ -116,29 +121,31 @@ def run_demo_episode(
         step_num += 1
 
         if verbose:
-            print(f"\nStep {step_num}")
-            print(f"Action -> {action_snapshot(action)}")
+            print(f"\nStep {step_num}", file=stream)
+            print(f"Action -> {action_snapshot(action)}", file=stream)
             print(
                 f"Reward={next_observation.reward} | "
                 f"Done={next_observation.done} | "
                 f"Running total={next_observation.total_score:.3f} | "
-                f"Budget={next_observation.budget_remaining}"
+                f"Budget={next_observation.budget_remaining}",
+                file=stream,
             )
-            print(f"Message -> {next_observation.message}")
+            print(f"Message -> {next_observation.message}", file=stream)
 
             if next_observation.patient_outcomes:
                 top_outcomes = ", ".join(
                     f"{ward_id}={score:.3f}"
                     for ward_id, score in sorted(next_observation.patient_outcomes.items())
                 )
-                print(f"Ward outcomes -> {top_outcomes}")
+                print(f"Ward outcomes -> {top_outcomes}", file=stream)
 
         observation = next_observation
 
     episode_score = clamp_task_score(observation.reward)
     official_score = run_task_score(config, base_seed=seed)
-    print(f"Single-seed demo score: {episode_score:.3f}")
-    print(f"Official multi-seed task score: {official_score:.3f}")
+    if verbose:
+        print(f"Single-seed demo score: {episode_score:.3f}", file=stream)
+        print(f"Official multi-seed task score: {official_score:.3f}", file=stream)
     return official_score
 
 
@@ -177,15 +184,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print_header("Hospital Drug Shortage OpenEnv Demo")
-    print("This demo exposes the task suite and prints normalized task scores.")
     if args.verbose:
-        print("Verbose mode is enabled: step-by-step episode logs will be shown.")
-    else:
-        print("Concise mode is enabled: only validator-friendly task summaries will be shown.")
-    print(f"Seed: {args.seed}")
-    print(f"Difficulties: {', '.join(difficulties_to_run(args.difficulty))}")
-    print(f"Tasks discovered: {len(list_task_metadata())}")
+        print_header("Hospital Drug Shortage OpenEnv Demo")
+        print("This demo exposes the task suite and prints normalized task scores.", file=sys.stderr)
+        print("Verbose mode is enabled: step-by-step episode logs will be shown.", file=sys.stderr)
+        print(f"Seed: {args.seed}", file=sys.stderr)
+        print(f"Difficulties: {', '.join(difficulties_to_run(args.difficulty))}", file=sys.stderr)
+        print(f"Tasks discovered: {len(list_task_metadata())}", file=sys.stderr)
 
     final_scores: dict[str, float] = {}
     for difficulty in difficulties_to_run(args.difficulty):
@@ -194,24 +199,43 @@ def main() -> None:
             seed=args.seed,
             max_steps=args.max_steps,
             verbose=args.verbose,
+            stream=sys.stderr,
         )
         if score is not None:
             final_scores[difficulty] = score
-        print()
+        if args.verbose:
+            print(file=sys.stderr)
 
-    print_header("Demo Summary")
-    if final_scores:
-        for difficulty, score in final_scores.items():
-            print(f"{difficulty}: {score:.3f}")
-        print(f"\nAll task scores strictly in (0.0, 1.0): {all(0.0 < score < 1.0 for score in final_scores.values())}")
-        print("\nTask metadata:")
-        for task in list_task_metadata():
+    payload = {
+        "tasks_discovered": len(list_task_metadata()),
+        "scores": final_scores,
+        "all_scores_strictly_between_zero_and_one": all(
+            0.0 < score < 1.0 for score in final_scores.values()
+        ),
+        "tasks": list_task_metadata(),
+    }
+
+    if args.verbose:
+        print_header("Demo Summary", stream=sys.stderr)
+        if final_scores:
+            for difficulty, score in final_scores.items():
+                print(f"{difficulty}: {score:.3f}", file=sys.stderr)
             print(
-                f"- {task['id']}: grader={task['has_grader']} max_steps={task['max_steps']} "
-                f"success_threshold={task['success_threshold']}"
+                f"\nAll task scores strictly in (0.0, 1.0): "
+                f"{payload['all_scores_strictly_between_zero_and_one']}",
+                file=sys.stderr,
             )
-    else:
-        print("No episode reached termination because a max-step limit was used.")
+            print("\nTask metadata:", file=sys.stderr)
+            for task in list_task_metadata():
+                print(
+                    f"- {task['id']}: grader={task['has_grader']} max_steps={task['max_steps']} "
+                    f"success_threshold={task['success_threshold']}",
+                    file=sys.stderr,
+                )
+        else:
+            print("No episode reached termination because a max-step limit was used.", file=sys.stderr)
+
+    print(json.dumps(payload, indent=2))
 
 
 if __name__ == "__main__":
