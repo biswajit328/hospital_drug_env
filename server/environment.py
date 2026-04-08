@@ -496,9 +496,13 @@ class HospitalDrugEnvironment(Environment):
             if event_message:
                 message += f" Event: {event_message}"
 
+        step_reward = (
+            final_reward if done else clamp_validator_safe_score(round(day_score, 3))
+        )
+
         return DrugShortageObservation(
             done=done,
-            reward=final_reward if done else round(day_score, 3),
+            reward=step_reward,
             day=self._day,
             budget_remaining=round(self._budget, 2),
             inventory=dict(self._inventory),
