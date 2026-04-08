@@ -177,7 +177,7 @@ Run the built-in graders locally:
 python grader.py --difficulty all --seed 42
 ```
 
-All task scores are deterministic for a fixed seed and normalized to the `0.0-1.0` range.
+All task scores are deterministic for a fixed seed and normalized to the strict `(0.0, 1.0)` range.
 Each task score is averaged over two fixed seeds (`seed` and `seed + 1`) to reduce overfitting.
 
 ### Reproducible Baseline Scores
@@ -192,9 +192,9 @@ Expected output:
 
 ```json
 {
-  "easy": 1.0,
-  "hard": 0.576,
-  "medium": 0.972
+  "easy": 0.95,
+  "hard": 0.528,
+  "medium": 0.897
 }
 ```
 
@@ -352,7 +352,7 @@ The demo script:
 - gives reviewers a one-command proof that the environment works
 
 Note: `demo.py` is a reviewer-friendly proof run. For the official deterministic benchmark,
-use `grader.py`, which averages fixed seeds and reports task scores in the `0.0-1.0` range.
+ use `grader.py`, which averages fixed seeds and reports task scores strictly within `(0.0, 1.0)`.
 
 ## Running Inference
 ```bash
