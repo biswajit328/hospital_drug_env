@@ -26,7 +26,14 @@ def root() -> RedirectResponse:
 
 
 @app.get("/tasks", tags=["Environment Info"])
-def list_tasks() -> dict:
+def list_tasks() -> list[dict]:
+    # Return a raw task list so validators can count tasks directly without
+    # needing to unwrap a nested payload.
+    return list_task_metadata()
+
+
+@app.get("/tasks/details", tags=["Environment Info"])
+def list_tasks_details() -> dict:
     return {"tasks": list_task_metadata()}
 
 
@@ -71,7 +78,17 @@ def grade_task(task_id: str, seed: int = 42) -> dict:
 
 
 @app.get("/grader", tags=["Environment Info"])
-def grade_all_tasks(seed: int = 42) -> dict:
+def grade_all_tasks(seed: int = 42) -> dict[str, float]:
+    # Return a flat mapping so validators can treat each top-level key as a
+    # task score without additional schema knowledge.
+    return {
+        task_id: run_task_score(config, base_seed=seed)
+        for task_id, config in TASKS.items()
+    }
+
+
+@app.get("/grader/details", tags=["Environment Info"])
+def grade_all_tasks_details(seed: int = 42) -> dict:
     return {
         "scores": {
             task_id: run_task_score(config, base_seed=seed)

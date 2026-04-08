@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 try:
+    from hospital_drug_env.score_utils import (
+        MAX_VALID_SCORE,
+        MIN_VALID_SCORE,
+        clamp_validator_safe_score,
+    )
     from hospital_drug_env.server.environment import (
         DRUG_COSTS,
         SUBSTITUTE_MAP,
@@ -12,6 +17,7 @@ try:
     )
     from hospital_drug_env.models import DrugShortageAction
 except ModuleNotFoundError:
+    from score_utils import MAX_VALID_SCORE, MIN_VALID_SCORE, clamp_validator_safe_score
     from server.environment import DRUG_COSTS, SUBSTITUTE_MAP, HospitalDrugEnvironment
     from models import DrugShortageAction
 
@@ -74,8 +80,6 @@ TASKS = {
     ),
 }
 
-MIN_VALID_SCORE = 0.05
-MAX_VALID_SCORE = 0.95
 TASK_MAX_STEPS = {
     "easy": 5,
     "medium": 7,
@@ -335,7 +339,8 @@ def run_episode(config: TaskConfig, seed: int = 42) -> float:
         observation = env.step(action)
         done = observation.done
 
-    return float(observation.reward) if observation.reward is not None else 0.0
+    raw_score = float(observation.reward) if observation.reward is not None else 0.0
+    return clamp_validator_safe_score(raw_score)
 
 
 def run_task_score(config: TaskConfig, base_seed: int = 42) -> float:
@@ -344,10 +349,7 @@ def run_task_score(config: TaskConfig, base_seed: int = 42) -> float:
     score = sum(scores) / len(scores)
     if not 0.0 <= score <= 1.0:
         raise ValueError(f"Task score out of range for {config.name}: {score}")
-    # Keep scores normalized while satisfying strict external validators
-    # that reject exact 0.0/1.0 boundary values.
-    score = min(MAX_VALID_SCORE, max(MIN_VALID_SCORE, score))
-    return round(score, 3)
+    return clamp_validator_safe_score(score)
 
 
 def grade_easy(seed: int = 42) -> float:

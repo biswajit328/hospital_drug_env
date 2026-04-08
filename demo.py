@@ -29,6 +29,7 @@ from grader import (
     list_task_metadata as grader_task_metadata,
     run_task_score,
 )
+from score_utils import clamp_validator_safe_score
 
 
 def inventory_snapshot(inventory: dict[str, int]) -> str:
@@ -72,9 +73,7 @@ def print_header(title: str) -> None:
 
 
 def clamp_task_score(score: float | None) -> float | None:
-    if score is None:
-        return None
-    return round(min(MAX_VALID_SCORE, max(MIN_VALID_SCORE, float(score))), 3)
+    return clamp_validator_safe_score(score)
 
 
 def list_task_metadata() -> list[dict]:

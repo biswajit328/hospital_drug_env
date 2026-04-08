@@ -6,12 +6,14 @@ from typing import Dict, List
 from openenv.core.env_server import Environment
 
 try:
+    from hospital_drug_env.score_utils import clamp_validator_safe_score
     from hospital_drug_env.models import (
         DrugShortageAction,
         DrugShortageObservation,
         DrugShortageState,
     )
 except ModuleNotFoundError:
+    from score_utils import clamp_validator_safe_score
     from models import (
         DrugShortageAction,
         DrugShortageObservation,
@@ -459,8 +461,8 @@ class HospitalDrugEnvironment(Environment):
 
         final_reward = None
         if done:
-            final_reward = round(
-                self._total_score / self._settings["total_days"], 3
+            final_reward = clamp_validator_safe_score(
+                round(self._total_score / self._settings["total_days"], 3)
             )
             message = f"Episode complete. Final score: {final_reward:.3f}"
         else:
