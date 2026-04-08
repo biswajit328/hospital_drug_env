@@ -84,6 +84,7 @@ def list_task_metadata() -> list[dict]:
 
 
 def run_demo_episode(
+    task_id: str,
     config: TaskConfig,
     seed: int,
     max_steps: int | None,
@@ -93,7 +94,7 @@ def run_demo_episode(
 ) -> float | None:
     stream = stream or sys.stderr
     env = HospitalDrugEnvironment()
-    observation = env.reset(difficulty=config.difficulty, seed=seed)
+    observation = env.reset(task_id=task_id, difficulty=config.difficulty, seed=seed)
 
     if verbose:
         print_header(f"Task: {config.name} ({config.difficulty})", stream=stream)
@@ -151,7 +152,7 @@ def run_demo_episode(
 
 def difficulties_to_run(choice: str) -> Iterable[str]:
     if choice == "all":
-        return ("easy", "medium", "hard")
+        return tuple(TASKS.keys())
     return (choice,)
 
 
@@ -161,7 +162,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--difficulty",
-        choices=["easy", "medium", "hard", "all"],
+        choices=[*TASKS.keys(), "all"],
         default="all",
         help="Which task difficulty to demo. Default: all.",
     )
@@ -195,6 +196,7 @@ def main() -> None:
     final_scores: dict[str, float] = {}
     for difficulty in difficulties_to_run(args.difficulty):
         score = run_demo_episode(
+            difficulty,
             TASKS[difficulty],
             seed=args.seed,
             max_steps=args.max_steps,
