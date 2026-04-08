@@ -26,6 +26,8 @@ from grader import (
     TASKS,
     TaskConfig,
     build_action,
+    list_task_metadata as grader_task_metadata,
+    run_task_score,
 )
 
 
@@ -75,21 +77,34 @@ def clamp_task_score(score: float | None) -> float | None:
     return round(min(MAX_VALID_SCORE, max(MIN_VALID_SCORE, float(score))), 3)
 
 
-def run_demo_episode(config: TaskConfig, seed: int, max_steps: int | None) -> float | None:
+def list_task_metadata() -> list[dict]:
+    return grader_task_metadata()
+
+
+def run_demo_episode(
+    config: TaskConfig,
+    seed: int,
+    max_steps: int | None,
+    *,
+    verbose: bool,
+) -> float | None:
     env = HospitalDrugEnvironment()
     observation = env.reset(difficulty=config.difficulty, seed=seed)
 
     print_header(f"Task: {config.name} ({config.difficulty})")
     print(f"Objective: {config.objective}")
     print(f"Policy style: {config.policy_style}")
-    print(
-        f"Reset complete -> day={observation.day}, "
-        f"budget={observation.budget_remaining}, "
-        f"total_score={observation.total_score:.3f}"
-    )
-    print(f"Initial inventory: {inventory_snapshot(observation.inventory)}")
-    print(f"Sample wards: {ward_snapshot(observation.wards)}")
-    print(f"Initial message: {observation.message}")
+    if verbose:
+        print(
+            f"Reset complete -> day={observation.day}, "
+            f"budget={observation.budget_remaining}, "
+            f"total_score={observation.total_score:.3f}"
+        )
+        print(f"Initial inventory: {inventory_snapshot(observation.inventory)}")
+        print(f"Sample wards: {ward_snapshot(observation.wards)}")
+        print(f"Initial message: {observation.message}")
+    else:
+        print("Mode: concise reviewer summary")
 
     step_num = 0
     while not observation.done:
@@ -101,28 +116,31 @@ def run_demo_episode(config: TaskConfig, seed: int, max_steps: int | None) -> fl
         next_observation = env.step(action)
         step_num += 1
 
-        print(f"\nStep {step_num}")
-        print(f"Action -> {action_snapshot(action)}")
-        print(
-            f"Reward={next_observation.reward} | "
-            f"Done={next_observation.done} | "
-            f"Running total={next_observation.total_score:.3f} | "
-            f"Budget={next_observation.budget_remaining}"
-        )
-        print(f"Message -> {next_observation.message}")
-
-        if next_observation.patient_outcomes:
-            top_outcomes = ", ".join(
-                f"{ward_id}={score:.3f}"
-                for ward_id, score in sorted(next_observation.patient_outcomes.items())
+        if verbose:
+            print(f"\nStep {step_num}")
+            print(f"Action -> {action_snapshot(action)}")
+            print(
+                f"Reward={next_observation.reward} | "
+                f"Done={next_observation.done} | "
+                f"Running total={next_observation.total_score:.3f} | "
+                f"Budget={next_observation.budget_remaining}"
             )
-            print(f"Ward outcomes -> {top_outcomes}")
+            print(f"Message -> {next_observation.message}")
+
+            if next_observation.patient_outcomes:
+                top_outcomes = ", ".join(
+                    f"{ward_id}={score:.3f}"
+                    for ward_id, score in sorted(next_observation.patient_outcomes.items())
+                )
+                print(f"Ward outcomes -> {top_outcomes}")
 
         observation = next_observation
 
-    final_score = clamp_task_score(observation.reward)
-    print(f"\nFinal normalized score for {config.difficulty}: {final_score:.3f}")
-    return final_score
+    episode_score = clamp_task_score(observation.reward)
+    official_score = run_task_score(config, base_seed=seed)
+    print(f"Single-seed demo score: {episode_score:.3f}")
+    print(f"Official multi-seed task score: {official_score:.3f}")
+    return official_score
 
 
 def difficulties_to_run(choice: str) -> Iterable[str]:
@@ -153,20 +171,31 @@ def main() -> None:
         default=None,
         help="Optional cap on the number of steps per episode for shorter demos.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full step-by-step walkthrough instead of concise task summaries.",
+    )
     args = parser.parse_args()
 
     print_header("Hospital Drug Shortage OpenEnv Demo")
-    print(
-        "This demo resets the environment, runs sample actions, prints rewards/done flags, "
-        "and shows final scores."
-    )
-    print("Note: demo scores are single-seed illustrative runs; use grader.py for official benchmark scores.")
+    print("This demo exposes the task suite and prints normalized task scores.")
+    if args.verbose:
+        print("Verbose mode is enabled: step-by-step episode logs will be shown.")
+    else:
+        print("Concise mode is enabled: only validator-friendly task summaries will be shown.")
     print(f"Seed: {args.seed}")
     print(f"Difficulties: {', '.join(difficulties_to_run(args.difficulty))}")
+    print(f"Tasks discovered: {len(list_task_metadata())}")
 
     final_scores: dict[str, float] = {}
     for difficulty in difficulties_to_run(args.difficulty):
-        score = run_demo_episode(TASKS[difficulty], seed=args.seed, max_steps=args.max_steps)
+        score = run_demo_episode(
+            TASKS[difficulty],
+            seed=args.seed,
+            max_steps=args.max_steps,
+            verbose=args.verbose,
+        )
         if score is not None:
             final_scores[difficulty] = score
         print()
@@ -175,7 +204,13 @@ def main() -> None:
     if final_scores:
         for difficulty, score in final_scores.items():
             print(f"{difficulty}: {score:.3f}")
-        print("\nUse `python grader.py --difficulty all --seed 42` for the official multi-seed reference benchmark.")
+        print(f"\nAll task scores strictly in (0.0, 1.0): {all(0.0 < score < 1.0 for score in final_scores.values())}")
+        print("\nTask metadata:")
+        for task in list_task_metadata():
+            print(
+                f"- {task['id']}: grader={task['has_grader']} max_steps={task['max_steps']} "
+                f"success_threshold={task['success_threshold']}"
+            )
     else:
         print("No episode reached termination because a max-step limit was used.")
 
