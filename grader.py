@@ -79,17 +79,50 @@ TASKS = {
         critical_threshold=0.82,
         max_emergency_orders_per_day=2,
     ),
+    "restock": TaskConfig(
+        name="Selective Restock Planning",
+        difficulty="medium",
+        objective=(
+            "Protect medium-term ward coverage by anticipating projected shortages "
+            "and using restrained emergency restocking only when it materially "
+            "improves future service continuity."
+        ),
+        policy_style="Forecast-aware ward balancing with conservative restocking",
+        allocation_mode="ward_balanced",
+        use_substitutions=False,
+        allow_emergency_orders=True,
+        critical_threshold=0.74,
+        max_emergency_orders_per_day=1,
+    ),
+    "recovery": TaskConfig(
+        name="Cold Chain Recovery",
+        difficulty="hard",
+        objective=(
+            "Recover service levels after disruption by combining triage, delayed "
+            "emergency restocking, and selective substitutions during prolonged scarcity."
+        ),
+        policy_style="Disruption recovery with substitutions and delayed procurement",
+        allocation_mode="severity_first",
+        use_substitutions=True,
+        allow_emergency_orders=True,
+        critical_threshold=0.80,
+        max_emergency_orders_per_day=2,
+    ),
 }
 
 TASK_MAX_STEPS = {
     "easy": 5,
     "medium": 7,
     "hard": 10,
+    "restock": 7,
+    "recovery": 10,
 }
 TASK_SUCCESS_THRESHOLDS = {
     "easy": 0.85,
     "medium": 0.70,
     "hard": 0.45,
+    "restock": 0.72,
+    "recovery": 0.42,
 }
 
 
@@ -387,6 +420,28 @@ def grade_hard(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     return score
 
 
+def grade_restock(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
+    """Task 4 - Selective Restock Planning."""
+    config = TASKS["restock"]
+    score = run_task_score(config, base_seed=seed)
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
+    return score
+
+
+def grade_recovery(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
+    """Task 5 - Cold Chain Recovery."""
+    config = TASKS["recovery"]
+    score = run_task_score(config, base_seed=seed)
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
+    return score
+
+
 def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> dict:
     """Run all 3 graders and return named task scores."""
     stream = stream or sys.stderr
@@ -398,6 +453,8 @@ def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> di
         "easy": grade_easy(seed=seed, verbose=verbose, stream=stream),
         "medium": grade_medium(seed=seed, verbose=verbose, stream=stream),
         "hard": grade_hard(seed=seed, verbose=verbose, stream=stream),
+        "restock": grade_restock(seed=seed, verbose=verbose, stream=stream),
+        "recovery": grade_recovery(seed=seed, verbose=verbose, stream=stream),
     }
 
     if verbose:
@@ -415,7 +472,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--difficulty",
-        choices=["easy", "medium", "hard", "all"],
+        choices=["easy", "medium", "hard", "restock", "recovery", "all"],
         default="all",
     )
     parser.add_argument("--seed", type=int, default=42)

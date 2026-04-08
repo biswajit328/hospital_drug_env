@@ -90,6 +90,14 @@ DIFFICULTY_SETTINGS = {
     },
 }
 
+TASK_ID_TO_DIFFICULTY = {
+    "easy": "easy",
+    "medium": "medium",
+    "hard": "hard",
+    "restock": "medium",
+    "recovery": "hard",
+}
+
 class HospitalWard:
     def __init__(self, ward_id: str, difficulty: str, rng: random.Random, specialty: str):
         self.ward_id = ward_id
@@ -293,8 +301,8 @@ class HospitalDrugEnvironment(Environment):
     ) -> DrugShortageObservation:
         self._rng = random.Random(seed)
 
-        if task_id in DIFFICULTY_SETTINGS:
-            difficulty = task_id
+        if task_id in TASK_ID_TO_DIFFICULTY:
+            difficulty = TASK_ID_TO_DIFFICULTY[task_id]
 
         self._difficulty = difficulty if difficulty in DIFFICULTY_SETTINGS else "medium"
         self._settings = DIFFICULTY_SETTINGS[self._difficulty]

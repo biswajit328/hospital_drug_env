@@ -14,6 +14,8 @@ from grader import (
     grade_easy,
     grade_hard,
     grade_medium,
+    grade_recovery,
+    grade_restock,
     list_task_metadata,
     run_all_graders,
     run_task_score,
@@ -25,12 +27,16 @@ GRADERS = {
     "easy": grade_easy,
     "medium": grade_medium,
     "hard": grade_hard,
+    "restock": grade_restock,
+    "recovery": grade_recovery,
 }
 
 # Extra conventional aliases for simplistic validator lookups.
 grade_task_easy = grade_easy
 grade_task_medium = grade_medium
 grade_task_hard = grade_hard
+grade_task_restock = grade_restock
+grade_task_recovery = grade_recovery
 
 
 def list_tasks() -> list[dict]:

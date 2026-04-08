@@ -39,3 +39,24 @@ tasks:
     success_threshold: 0.45
     grader: true
     has_grader: true
+  - id: restock
+    name: Selective Restock Planning
+    difficulty: medium
+    description: >
+      Protect medium-term ward coverage by anticipating projected shortages
+      and using restrained emergency restocking only when it materially
+      improves future service continuity.
+    max_steps: 7
+    success_threshold: 0.72
+    grader: true
+    has_grader: true
+  - id: recovery
+    name: Cold Chain Recovery
+    difficulty: hard
+    description: >
+      Recover service levels after disruption by combining triage, delayed
+      emergency restocking, and selective substitutions during prolonged scarcity.
+    max_steps: 10
+    success_threshold: 0.42
+    grader: true
+    has_grader: true
