@@ -11,9 +11,11 @@ from openai import OpenAI
 try:
     from hospital_drug_env.client import HospitalDrugEnv
     from hospital_drug_env.models import DrugShortageAction
+    from hospital_drug_env.score_utils import MIN_VALID_SCORE, clamp_validator_safe_score
 except ModuleNotFoundError:
     from client import HospitalDrugEnv
     from models import DrugShortageAction
+    from score_utils import MIN_VALID_SCORE, clamp_validator_safe_score
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
@@ -21,14 +23,24 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 SPACE_URL = os.getenv("SPACE_URL")
 DEFAULT_SPACE_URL = "https://biswajit328-hospital-drug-env.hf.space"
-DIFFICULTY = os.getenv("DIFFICULTY", "medium")
-TASK_NAME = os.getenv("TASK_NAME", DIFFICULTY)
+TASK_NAME_ENV = os.getenv("TASK_NAME")
+DIFFICULTY_ENV = os.getenv("DIFFICULTY")
 BENCHMARK = os.getenv("BENCHMARK", "hospital_drug_env")
 MAX_STEPS = max(1, int(os.getenv("MAX_STEPS", "10")))
 TEMPERATURE = 0.2
 MAX_TOKENS = 450
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.10"))
 ENV_CALL_RETRIES = int(os.getenv("ENV_CALL_RETRIES", "1"))
+BASE_SEED = int(os.getenv("INFERENCE_SEED", os.getenv("SEED", "42")))
+
+TASK_RUNTIME_CONFIGS = {
+    "easy": {"difficulty": "easy", "max_steps": 5},
+    "medium": {"difficulty": "medium", "max_steps": 7},
+    "hard": {"difficulty": "hard", "max_steps": 10},
+    "restock": {"difficulty": "medium", "max_steps": 7},
+    "recovery": {"difficulty": "hard", "max_steps": 10},
+}
+DEFAULT_TASK_SEQUENCE = ("easy", "medium", "hard")
 
 SUBSTITUTE_OPTIONS = {
     "amoxicillin": "azithromycin",
@@ -98,12 +110,12 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
-        flush=True,
-    )
+def format_score(score: float) -> str:
+    return f"{score:.3f}".rstrip("0").rstrip(".")
+
+
+def log_end(task: str, score: float, steps: int) -> None:
+    print(f"[END] task={task} score={format_score(score)} steps={steps}", flush=True)
 
 
 def format_action(action: DrugShortageAction) -> str:
@@ -323,13 +335,86 @@ def call_with_retry(func, *, label: str):
             time.sleep(0.5 * (attempt + 1))
     raise last_error
 
-def main():
+
+def resolve_task_sequence() -> List[str]:
+    requested = TASK_NAME_ENV or DIFFICULTY_ENV
+    if requested:
+        requested = requested.strip().lower()
+
+    if requested == "all":
+        return list(DEFAULT_TASK_SEQUENCE)
+    if requested in TASK_RUNTIME_CONFIGS and requested not in DEFAULT_TASK_SEQUENCE:
+        return [*DEFAULT_TASK_SEQUENCE, requested]
+    return list(DEFAULT_TASK_SEQUENCE)
+
+
+def run_single_task(env_client, client: OpenAI, task_name: str, *, seed: int) -> tuple[int, float]:
     rewards: List[float] = []
     steps_taken = 0
-    success = False
-    stage = "startup"
+    stage = f"{task_name}:startup"
+    result = None
+    runtime = TASK_RUNTIME_CONFIGS[task_name]
+    difficulty = runtime["difficulty"]
+    max_steps = min(MAX_STEPS, runtime["max_steps"])
+    final_score = MIN_VALID_SCORE
 
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+    try:
+        stage = f"{task_name}:reset"
+        result = call_with_retry(
+            lambda: env_client.reset(task_id=task_name, difficulty=difficulty, seed=seed),
+            label=f"{task_name} reset",
+        )
+        observation = result.observation
+
+        for step in range(1, max_steps + 1):
+            if result.done:
+                break
+
+            stage = f"{task_name}:model step {step}"
+            user_content = format_observation(observation, step)
+            response_text = request_model_response(client, user_content)
+
+            action = parse_action(response_text, observation)
+            stage = f"{task_name}:env step {step}"
+            result = call_with_retry(
+                lambda: env_client.step(action),
+                label=f"{task_name} step {step}",
+            )
+            observation = result.observation
+            reward = float(result.reward or 0.0)
+            rewards.append(reward)
+            steps_taken = step
+            log_step(
+                step=step,
+                action=format_action(action),
+                reward=reward,
+                done=result.done,
+                error=None,
+            )
+
+            if result.done:
+                break
+
+        if result is not None:
+            final_raw_score = float(result.reward or 0.0)
+            clamped = clamp_validator_safe_score(final_raw_score)
+            final_score = clamped if clamped is not None else MIN_VALID_SCORE
+    except Exception as exc:
+        print(
+            f"[inference] Failed during {stage}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        final_score = MIN_VALID_SCORE
+    finally:
+        log_end(task=task_name, score=final_score, steps=steps_taken)
+
+    return steps_taken, final_score
+
+def main():
+    stage = "startup"
+    task_sequence = resolve_task_sequence()
     try:
         if HF_TOKEN is None:
             raise ValueError("HF_TOKEN or API_KEY environment variable is required")
@@ -346,54 +431,15 @@ def main():
         )
         env = build_sync_env()
         with env as e:
-            stage = "reset"
-            result = call_with_retry(
-                lambda: e.reset(difficulty=DIFFICULTY),
-                label="reset",
-            )
-            observation = result.observation
-
-            for step in range(1, MAX_STEPS + 1):
-                if result.done:
-                    break
-
-                stage = f"model step {step}"
-                user_content = format_observation(observation, step)
-                response_text = request_model_response(client, user_content)
-
-                action = parse_action(response_text, observation)
-                stage = f"env step {step}"
-                result = call_with_retry(
-                    lambda: e.step(action),
-                    label=f"step {step}",
-                )
-                observation = result.observation
-                reward = float(result.reward or 0.0)
-                rewards.append(reward)
-                steps_taken = step
-                log_step(
-                    step=step,
-                    action=format_action(action),
-                    reward=reward,
-                    done=result.done,
-                    error=None,
-                )
-
-                if result.done:
-                    break
-
-            if rewards:
-                final_score = float(result.reward or 0.0)
-                success = final_score >= SUCCESS_SCORE_THRESHOLD
+            for index, task_name in enumerate(task_sequence):
+                stage = task_name
+                run_single_task(e, client, task_name, seed=BASE_SEED + index)
     except Exception as exc:
         print(
             f"[inference] Failed during {stage}: {type(exc).__name__}: {exc}",
             file=sys.stderr,
             flush=True,
         )
-        success = False
-    finally:
-        log_end(success=success, steps=steps_taken, rewards=rewards)
 
 if __name__ == "__main__":
     main()
