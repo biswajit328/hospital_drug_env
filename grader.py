@@ -2,10 +2,16 @@
 import argparse
 import json
 import sys
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 try:
+    from hospital_drug_env.benchmark_registry import (
+        TASKS,
+        TASK_MAX_STEPS,
+        TASK_SUCCESS_THRESHOLDS,
+        TaskConfig,
+        list_task_metadata,
+    )
     from hospital_drug_env.score_utils import (
         MAX_VALID_SCORE,
         MIN_VALID_SCORE,
@@ -18,131 +24,10 @@ try:
     )
     from hospital_drug_env.models import DrugShortageAction
 except ModuleNotFoundError:
+    from benchmark_registry import TASKS, TASK_MAX_STEPS, TASK_SUCCESS_THRESHOLDS, TaskConfig, list_task_metadata
     from score_utils import MAX_VALID_SCORE, MIN_VALID_SCORE, clamp_validator_safe_score
     from server.environment import DRUG_COSTS, SUBSTITUTE_MAP, HospitalDrugEnvironment
     from models import DrugShortageAction
-
-
-@dataclass(frozen=True)
-class TaskConfig:
-    name: str
-    difficulty: str
-    objective: str
-    policy_style: str
-    allocation_mode: str
-    use_substitutions: bool
-    allow_emergency_orders: bool
-    critical_threshold: float
-    max_emergency_orders_per_day: int
-
-
-TASKS = {
-    "easy": TaskConfig(
-        name="Critical Care Stabilization",
-        difficulty="easy",
-        objective=(
-            "Maintain high service levels when supplies are mostly reliable by "
-            "routing inventory to the highest-severity patients first."
-        ),
-        policy_style="Severity-aware ward balancing without emergency procurement",
-        allocation_mode="ward_balanced",
-        use_substitutions=False,
-        allow_emergency_orders=False,
-        critical_threshold=0.65,
-        max_emergency_orders_per_day=0,
-    ),
-    "medium": TaskConfig(
-        name="Budget-Constrained Ward Balancing",
-        difficulty="medium",
-        objective=(
-            "Balance medium-term patient outcomes with budget discipline, using "
-            "targeted emergency orders only when high-severity shortages remain."
-        ),
-        policy_style="Budget-aware balancing with selective emergency ordering",
-        allocation_mode="ward_balanced",
-        use_substitutions=False,
-        allow_emergency_orders=True,
-        critical_threshold=0.78,
-        max_emergency_orders_per_day=1,
-    ),
-    "hard": TaskConfig(
-        name="Substitution-Aware Surge Response",
-        difficulty="hard",
-        objective=(
-            "Handle prolonged scarcity by combining severity-first allocation, "
-            "selective emergency procurement, and clinically valid substitutions."
-        ),
-        policy_style="Severity-first triage with substitutions and disruption recovery",
-        allocation_mode="severity_first",
-        use_substitutions=True,
-        allow_emergency_orders=True,
-        critical_threshold=0.82,
-        max_emergency_orders_per_day=2,
-    ),
-    "restock": TaskConfig(
-        name="Selective Restock Planning",
-        difficulty="medium",
-        objective=(
-            "Protect medium-term ward coverage by anticipating projected shortages "
-            "and using restrained emergency restocking only when it materially "
-            "improves future service continuity."
-        ),
-        policy_style="Forecast-aware ward balancing with conservative restocking",
-        allocation_mode="ward_balanced",
-        use_substitutions=False,
-        allow_emergency_orders=True,
-        critical_threshold=0.74,
-        max_emergency_orders_per_day=1,
-    ),
-    "recovery": TaskConfig(
-        name="Cold Chain Recovery",
-        difficulty="hard",
-        objective=(
-            "Recover service levels after disruption by combining triage, delayed "
-            "emergency restocking, and selective substitutions during prolonged scarcity."
-        ),
-        policy_style="Disruption recovery with substitutions and delayed procurement",
-        allocation_mode="severity_first",
-        use_substitutions=True,
-        allow_emergency_orders=True,
-        critical_threshold=0.80,
-        max_emergency_orders_per_day=2,
-    ),
-}
-
-TASK_MAX_STEPS = {
-    "easy": 5,
-    "medium": 7,
-    "hard": 10,
-    "restock": 7,
-    "recovery": 10,
-}
-TASK_SUCCESS_THRESHOLDS = {
-    "easy": 0.85,
-    "medium": 0.70,
-    "hard": 0.45,
-    "restock": 0.72,
-    "recovery": 0.42,
-}
-
-
-def list_task_metadata() -> List[dict]:
-    tasks: List[dict] = []
-    for task_id, config in TASKS.items():
-        tasks.append(
-            {
-                "id": task_id,
-                "name": config.name,
-                "difficulty": config.difficulty,
-                "description": config.objective,
-                "policy_style": config.policy_style,
-                "max_steps": TASK_MAX_STEPS[task_id],
-                "success_threshold": TASK_SUCCESS_THRESHOLDS[task_id],
-                "grader": True,
-                "has_grader": True,
-            }
-        )
-    return tasks
 
 
 def print_task_header(config: TaskConfig, seed: int, *, stream=None) -> None:
@@ -170,11 +55,16 @@ def collect_patient_needs(observation) -> List[dict]:
                     "drug": patient["drug"],
                     "severity": float(patient.get("severity", 0.0)),
                     "remaining_need": remaining_need,
+                    "requires_primary_drug": bool(patient.get("requires_primary_drug", False)),
                 }
             )
 
     patient_needs.sort(
-        key=lambda need: (need["severity"], need["remaining_need"]),
+        key=lambda need: (
+            need["requires_primary_drug"],
+            need["severity"],
+            need["remaining_need"],
+        ),
         reverse=True,
     )
     return patient_needs
@@ -185,6 +75,7 @@ def allocate_patients(
     inventory: Dict[str, int],
     *,
     use_substitutions: bool,
+    respect_direct_only_constraints: bool,
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, str], Dict[str, dict]]:
     allocations: Dict[str, Dict[str, int]] = {}
     substitutions: Dict[str, str] = {}
@@ -202,7 +93,11 @@ def allocate_patients(
             remaining_inventory[drug] = remaining_inventory.get(drug, 0) - direct_given
             remaining_need -= direct_given
 
-        if remaining_need > 0 and use_substitutions:
+        if (
+            remaining_need > 0
+            and use_substitutions
+            and not (respect_direct_only_constraints and need["requires_primary_drug"])
+        ):
             substitute, _ = SUBSTITUTE_MAP.get(drug, (None, 0))
             if substitute:
                 substitute_given = min(remaining_need, remaining_inventory.get(substitute, 0))
@@ -217,10 +112,12 @@ def allocate_patients(
         if remaining_need > 0:
             shortage = shortages.setdefault(
                 drug,
-                {"max_severity": 0.0, "total_unmet": 0},
+                {"max_severity": 0.0, "total_unmet": 0, "direct_only_unmet": 0},
             )
             shortage["max_severity"] = max(shortage["max_severity"], need["severity"])
             shortage["total_unmet"] += remaining_need
+            if need["requires_primary_drug"]:
+                shortage["direct_only_unmet"] += remaining_need
 
     allocations = {ward_id: ward_alloc for ward_id, ward_alloc in allocations.items() if ward_alloc}
     return allocations, substitutions, shortages
@@ -231,6 +128,7 @@ def allocate_wards(
     inventory: Dict[str, int],
     *,
     use_substitutions: bool,
+    respect_direct_only_constraints: bool,
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, str], Dict[str, dict]]:
     allocations: Dict[str, Dict[str, int]] = {}
     substitutions: Dict[str, str] = {}
@@ -257,7 +155,8 @@ def allocate_wards(
 
             if remaining_need > 0 and use_substitutions:
                 substitute, _ = SUBSTITUTE_MAP.get(drug, (None, 0))
-                if substitute:
+                direct_only_in_ward = int(ward.get("direct_only_counts", {}).get(drug, 0))
+                if substitute and not (respect_direct_only_constraints and direct_only_in_ward > 0):
                     substitute_given = min(remaining_need, remaining_inventory.get(substitute, 0))
                     if substitute_given > 0:
                         ward_alloc[substitute] = ward_alloc.get(substitute, 0) + substitute_given
@@ -270,10 +169,11 @@ def allocate_wards(
             if remaining_need > 0:
                 shortage = shortages.setdefault(
                     drug,
-                    {"max_severity": 0.0, "total_unmet": 0},
+                    {"max_severity": 0.0, "total_unmet": 0, "direct_only_unmet": 0},
                 )
                 shortage["max_severity"] = max(shortage["max_severity"], ward_severity)
                 shortage["total_unmet"] += remaining_need
+                shortage["direct_only_unmet"] += int(ward.get("direct_only_counts", {}).get(drug, 0))
 
         if not ward_alloc:
             allocations.pop(ward["ward_id"], None)
@@ -291,7 +191,11 @@ def choose_emergency_orders(
 
     ranked_shortages = sorted(
         shortages.items(),
-        key=lambda item: (item[1]["max_severity"], item[1]["total_unmet"]),
+        key=lambda item: (
+            item[1].get("direct_only_unmet", 0),
+            item[1]["max_severity"],
+            item[1]["total_unmet"],
+        ),
         reverse=True,
     )
 
@@ -312,20 +216,58 @@ def choose_emergency_orders(
     return emergency_orders
 
 
+def build_forecast_reserve(observation) -> Dict[str, int]:
+    reserve: Dict[str, int] = {}
+    for ward in observation.wards:
+        forecast = ward.get("demand_forecast") or {}
+        band = forecast.get("expected_new_patients_band") or {}
+        upper_bound = int(band.get("max", 0))
+        if upper_bound <= 0:
+            continue
+
+        risk_band = forecast.get("risk_band", "low")
+        if risk_band == "high":
+            reserve_units = min(6, max(2, upper_bound * 2))
+        elif risk_band == "medium":
+            reserve_units = min(4, max(1, upper_bound + 1))
+        else:
+            reserve_units = min(2, upper_bound)
+
+        for drug in forecast.get("priority_drugs", [])[:2]:
+            reserve[drug] = reserve.get(drug, 0) + reserve_units
+
+    return reserve
+
+
+def apply_reserve_to_inventory(inventory: Dict[str, int], reserve: Dict[str, int]) -> Dict[str, int]:
+    adjusted = {drug: max(0, int(qty)) for drug, qty in inventory.items()}
+    for drug, qty in reserve.items():
+        adjusted[drug] = max(0, adjusted.get(drug, 0) - qty)
+    return adjusted
+
+
 def build_action(observation, config: TaskConfig) -> DrugShortageAction:
     patient_needs = collect_patient_needs(observation)
+    reserve_by_drug = build_forecast_reserve(observation) if config.use_forecast_reserve else {}
+    working_inventory = (
+        apply_reserve_to_inventory(observation.inventory, reserve_by_drug)
+        if reserve_by_drug
+        else observation.inventory
+    )
 
     if config.allocation_mode == "severity_first":
         allocations, substitutions, shortages = allocate_patients(
             patient_needs,
-            observation.inventory,
+            working_inventory,
             use_substitutions=config.use_substitutions,
+            respect_direct_only_constraints=config.respect_direct_only_constraints,
         )
     else:
         allocations, substitutions, shortages = allocate_wards(
             observation,
-            observation.inventory,
+            working_inventory,
             use_substitutions=config.use_substitutions,
+            respect_direct_only_constraints=config.respect_direct_only_constraints,
         )
 
     emergency_orders: List[str] = []
@@ -339,18 +281,22 @@ def build_action(observation, config: TaskConfig) -> DrugShortageAction:
             augmented_inventory = dict(observation.inventory)
             for drug in emergency_orders:
                 augmented_inventory[drug] = augmented_inventory.get(drug, 0) + 20
+            if reserve_by_drug:
+                augmented_inventory = apply_reserve_to_inventory(augmented_inventory, reserve_by_drug)
 
             if config.allocation_mode == "severity_first":
                 allocations, substitutions, _ = allocate_patients(
                     patient_needs,
                     augmented_inventory,
                     use_substitutions=config.use_substitutions,
+                    respect_direct_only_constraints=config.respect_direct_only_constraints,
                 )
             else:
                 allocations, substitutions, _ = allocate_wards(
                     observation,
                     augmented_inventory,
                     use_substitutions=config.use_substitutions,
+                    respect_direct_only_constraints=config.respect_direct_only_constraints,
                 )
 
     return DrugShortageAction(
@@ -420,9 +366,9 @@ def grade_hard(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     return score
 
 
-def grade_restock(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
-    """Task 4 - Selective Restock Planning."""
-    config = TASKS["restock"]
+def grade_clinical(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
+    """Task 4 - Clinical Override Triage."""
+    config = TASKS["clinical"]
     score = run_task_score(config, base_seed=seed)
     if verbose:
         stream = stream or sys.stderr
@@ -431,9 +377,9 @@ def grade_restock(seed: int = 42, *, verbose: bool = False, stream=None) -> floa
     return score
 
 
-def grade_recovery(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
-    """Task 5 - Cold Chain Recovery."""
-    config = TASKS["recovery"]
+def grade_forecast(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
+    """Task 5 - Forecast-Aware Reserve Planning."""
+    config = TASKS["forecast"]
     score = run_task_score(config, base_seed=seed)
     if verbose:
         stream = stream or sys.stderr
@@ -443,7 +389,7 @@ def grade_recovery(seed: int = 42, *, verbose: bool = False, stream=None) -> flo
 
 
 def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> dict:
-    """Run all 3 graders and return named task scores."""
+    """Run the full task suite and return named task scores."""
     stream = stream or sys.stderr
     if verbose:
         print("Running all graders...", file=stream)
@@ -453,8 +399,8 @@ def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> di
         "easy": grade_easy(seed=seed, verbose=verbose, stream=stream),
         "medium": grade_medium(seed=seed, verbose=verbose, stream=stream),
         "hard": grade_hard(seed=seed, verbose=verbose, stream=stream),
-        "restock": grade_restock(seed=seed, verbose=verbose, stream=stream),
-        "recovery": grade_recovery(seed=seed, verbose=verbose, stream=stream),
+        "clinical": grade_clinical(seed=seed, verbose=verbose, stream=stream),
+        "forecast": grade_forecast(seed=seed, verbose=verbose, stream=stream),
     }
 
     if verbose:
@@ -472,7 +418,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--difficulty",
-        choices=["easy", "medium", "hard", "restock", "recovery", "all"],
+        choices=["easy", "medium", "hard", "clinical", "forecast", "all"],
         default="all",
     )
     parser.add_argument("--seed", type=int, default=42)

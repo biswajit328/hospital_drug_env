@@ -1,24 +1,22 @@
-"""Compatibility shim for validators that look for `graders.py`.
+"""Public benchmark scoring surface.
 
 This module mirrors the task-scoring surface already implemented in
-`grader.py`, but exposes it under the plural filename many simple validators
-expect when scanning a submission repo.
+`grader.py`, but exposes it under the plural filename many simple tools and
+reviewers expect when scanning a benchmark repo.
 """
 
 from __future__ import annotations
 
 import json
 
+from benchmark_registry import list_task_metadata
 from grader import (
-    TASKS as GRADER_TASKS,
+    grade_clinical,
     grade_easy,
+    grade_forecast,
     grade_hard,
     grade_medium,
-    grade_recovery,
-    grade_restock,
-    list_task_metadata,
     run_all_graders,
-    run_task_score,
 )
 
 # Expose a raw task list at module scope for simple validators.
@@ -27,16 +25,16 @@ GRADERS = {
     "easy": grade_easy,
     "medium": grade_medium,
     "hard": grade_hard,
-    "restock": grade_restock,
-    "recovery": grade_recovery,
+    "clinical": grade_clinical,
+    "forecast": grade_forecast,
 }
 
 # Extra conventional aliases for simplistic validator lookups.
 grade_task_easy = grade_easy
 grade_task_medium = grade_medium
 grade_task_hard = grade_hard
-grade_task_restock = grade_restock
-grade_task_recovery = grade_recovery
+grade_task_clinical = grade_clinical
+grade_task_forecast = grade_forecast
 
 
 def list_tasks() -> list[dict]:

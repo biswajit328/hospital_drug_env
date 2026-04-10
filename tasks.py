@@ -1,13 +1,14 @@
-"""Validator-friendly task discovery surface.
+"""Public benchmark task surface.
 
-This module exposes the task suite and scoring helpers in a simple, conventional
-shape so external tooling can discover tasks without needing to inspect the
-server implementation or parse human-readable CLI output.
+This module exposes task discovery and score lookup in a simple scriptable form
+so external tooling, demos, and reviewers can inspect the benchmark without
+depending on server internals.
 """
 
 from __future__ import annotations
 
-from grader import TASKS as GRADER_TASKS, list_task_metadata, run_task_score
+from benchmark_registry import TASKS as REGISTRY_TASKS, list_task_metadata
+from grader import run_task_score
 
 
 # Expose a raw task list at module scope for validators that look for a
@@ -16,20 +17,20 @@ TASKS = list_task_metadata()
 
 
 def list_tasks() -> list[dict]:
-    """Return the 3 task definitions as a raw list."""
+    """Return the task definitions as a raw list."""
     return [dict(task) for task in TASKS]
 
 
 def score_task(task_id: str, seed: int = 42) -> float:
     """Return a single validator-safe task score."""
-    config = GRADER_TASKS[task_id]
+    config = REGISTRY_TASKS[task_id]
     return run_task_score(config, base_seed=seed)
 
 
 def score_all_tasks(seed: int = 42) -> dict[str, float]:
     """Return a flat mapping from task id to validator-safe score."""
     return {
-        task["id"]: run_task_score(GRADER_TASKS[task["id"]], base_seed=seed)
+        task["id"]: run_task_score(REGISTRY_TASKS[task["id"]], base_seed=seed)
         for task in TASKS
     }
 

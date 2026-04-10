@@ -9,10 +9,15 @@ from typing import List, Optional
 from openai import OpenAI
 
 try:
+    from hospital_drug_env.benchmark_registry import (
+        DEFAULT_INFERENCE_TASKS,
+        TASK_RUNTIME_CONFIGS,
+    )
     from hospital_drug_env.client import HospitalDrugEnv
     from hospital_drug_env.models import DrugShortageAction
     from hospital_drug_env.score_utils import MIN_VALID_SCORE, clamp_validator_safe_score
 except ModuleNotFoundError:
+    from benchmark_registry import DEFAULT_INFERENCE_TASKS, TASK_RUNTIME_CONFIGS
     from client import HospitalDrugEnv
     from models import DrugShortageAction
     from score_utils import MIN_VALID_SCORE, clamp_validator_safe_score
@@ -32,15 +37,6 @@ MAX_TOKENS = 450
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.10"))
 ENV_CALL_RETRIES = int(os.getenv("ENV_CALL_RETRIES", "1"))
 BASE_SEED = int(os.getenv("INFERENCE_SEED", os.getenv("SEED", "42")))
-
-TASK_RUNTIME_CONFIGS = {
-    "easy": {"difficulty": "easy", "max_steps": 5},
-    "medium": {"difficulty": "medium", "max_steps": 7},
-    "hard": {"difficulty": "hard", "max_steps": 10},
-    "restock": {"difficulty": "medium", "max_steps": 7},
-    "recovery": {"difficulty": "hard", "max_steps": 10},
-}
-DEFAULT_TASK_SEQUENCE = ("easy", "medium", "hard")
 
 SUBSTITUTE_OPTIONS = {
     "amoxicillin": "azithromycin",
@@ -85,6 +81,10 @@ Strategy:
   - paracetamol -> ibuprofen
   - morphine -> tramadol
 - Substitutions reduce side effects but have a penalty
+- Some patients may require the primary drug only due to contraindications or clinician override.
+- If a patient is marked as direct-only, do not assume the substitute is safe for them.
+- Some tasks only provide forecast bands for tomorrow's demand rather than exact future arrivals.
+- Use inventory reserves when a ward has a high-risk demand forecast.
 """
 
 PROXY_HEALTHCHECK_PROMPT = "Reply with OK."
@@ -145,8 +145,13 @@ def format_observation(obs, step) -> str:
         )[:3]
         lines.append(
             f"  {ward['ward_id']}: {ward['patient_count']} patients, "
-            f"needs={json.dumps(ward['drug_needs'])}"
+            f"needs={json.dumps(ward['drug_needs'])} "
+            f"direct_only={json.dumps(ward.get('direct_only_counts', {}))}"
         )
+        if ward.get("demand_forecast"):
+            lines.append(
+                f"    forecast={json.dumps(ward['demand_forecast'])}"
+            )
         if top_patients:
             lines.append(
                 f"    critical={json.dumps(top_patients)}"
@@ -173,11 +178,16 @@ def collect_patient_needs(observation) -> List[dict]:
                     "drug": patient["drug"],
                     "severity": float(patient.get("severity", 0.0)),
                     "remaining_need": remaining_need,
+                    "requires_primary_drug": bool(patient.get("requires_primary_drug", False)),
                 }
             )
 
     patient_needs.sort(
-        key=lambda need: (need["severity"], need["remaining_need"]),
+        key=lambda need: (
+            need["requires_primary_drug"],
+            need["severity"],
+            need["remaining_need"],
+        ),
         reverse=True,
     )
     return patient_needs
@@ -201,7 +211,7 @@ def allocate_greedily(patient_needs: List[dict], inventory: dict) -> tuple[dict,
             remaining_need -= direct_given
 
         substitute = SUBSTITUTE_OPTIONS.get(drug)
-        if remaining_need > 0 and substitute:
+        if remaining_need > 0 and substitute and not need["requires_primary_drug"]:
             substitute_given = min(remaining_need, remaining_inventory.get(substitute, 0))
             if substitute_given > 0:
                 ward_alloc[substitute] = ward_alloc.get(substitute, 0) + substitute_given
@@ -212,10 +222,12 @@ def allocate_greedily(patient_needs: List[dict], inventory: dict) -> tuple[dict,
         if remaining_need > 0:
             shortage = unmet_by_drug.setdefault(
                 drug,
-                {"max_severity": 0.0, "total_unmet": 0},
+                {"max_severity": 0.0, "total_unmet": 0, "direct_only_unmet": 0},
             )
             shortage["max_severity"] = max(shortage["max_severity"], need["severity"])
             shortage["total_unmet"] += remaining_need
+            if need["requires_primary_drug"]:
+                shortage["direct_only_unmet"] += remaining_need
 
     allocations = {ward_id: ward_alloc for ward_id, ward_alloc in allocations.items() if ward_alloc}
     return allocations, substitutions, unmet_by_drug
@@ -231,7 +243,11 @@ def plan_emergency_orders(
 
     for drug, shortage in sorted(
         unmet_by_drug.items(),
-        key=lambda item: (item[1]["max_severity"], item[1]["total_unmet"]),
+        key=lambda item: (
+            item[1].get("direct_only_unmet", 0),
+            item[1]["max_severity"],
+            item[1]["total_unmet"],
+        ),
         reverse=True,
     ):
         cost = EMERGENCY_ORDER_COSTS.get(drug, 5000)
@@ -245,9 +261,43 @@ def plan_emergency_orders(
     return emergency_orders
 
 
+def build_forecast_reserve(observation) -> dict:
+    reserve: dict = {}
+    for ward in observation.wards:
+        forecast = ward.get("demand_forecast") or {}
+        band = forecast.get("expected_new_patients_band") or {}
+        upper_bound = int(band.get("max", 0))
+        if upper_bound <= 0:
+            continue
+
+        risk_band = forecast.get("risk_band", "low")
+        if risk_band == "high":
+            reserve_units = min(6, max(2, upper_bound * 2))
+        elif risk_band == "medium":
+            reserve_units = min(4, max(1, upper_bound + 1))
+        else:
+            reserve_units = min(2, upper_bound)
+
+        for drug in forecast.get("priority_drugs", [])[:2]:
+            reserve[drug] = reserve.get(drug, 0) + reserve_units
+    return reserve
+
+
+def apply_reserve_to_inventory(inventory: dict, reserve: dict) -> dict:
+    adjusted = {drug: max(0, int(qty)) for drug, qty in inventory.items()}
+    for drug, qty in reserve.items():
+        adjusted[drug] = max(0, adjusted.get(drug, 0) - qty)
+    return adjusted
+
+
 def fallback_action(observation) -> DrugShortageAction:
     patient_needs = collect_patient_needs(observation)
-    working_inventory = dict(observation.inventory)
+    reserve_by_drug = build_forecast_reserve(observation)
+    working_inventory = (
+        apply_reserve_to_inventory(observation.inventory, reserve_by_drug)
+        if reserve_by_drug
+        else dict(observation.inventory)
+    )
 
     allocations, substitutions, unmet_by_drug = allocate_greedily(
         patient_needs,
@@ -342,10 +392,10 @@ def resolve_task_sequence() -> List[str]:
         requested = requested.strip().lower()
 
     if requested == "all":
-        return list(DEFAULT_TASK_SEQUENCE)
-    if requested in TASK_RUNTIME_CONFIGS and requested not in DEFAULT_TASK_SEQUENCE:
-        return [*DEFAULT_TASK_SEQUENCE, requested]
-    return list(DEFAULT_TASK_SEQUENCE)
+        return list(DEFAULT_INFERENCE_TASKS)
+    if requested in TASK_RUNTIME_CONFIGS and requested not in DEFAULT_INFERENCE_TASKS:
+        return [*DEFAULT_INFERENCE_TASKS, requested]
+    return list(DEFAULT_INFERENCE_TASKS)
 
 
 def run_single_task(env_client, client: OpenAI, task_name: str, *, seed: int) -> tuple[int, float]:

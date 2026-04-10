@@ -6,6 +6,11 @@ from typing import Dict, List
 from openenv.core.env_server import Environment
 
 try:
+    from hospital_drug_env.benchmark_registry import (
+        CLINICAL_CONSTRAINT_TASKS,
+        TASK_ID_TO_DIFFICULTY,
+        UNCERTAIN_DEMAND_TASKS,
+    )
     from hospital_drug_env.score_utils import clamp_validator_safe_score
     from hospital_drug_env.models import (
         DrugShortageAction,
@@ -13,6 +18,7 @@ try:
         DrugShortageState,
     )
 except ModuleNotFoundError:
+    from benchmark_registry import CLINICAL_CONSTRAINT_TASKS, TASK_ID_TO_DIFFICULTY, UNCERTAIN_DEMAND_TASKS
     from score_utils import clamp_validator_safe_score
     from models import (
         DrugShortageAction,
@@ -90,35 +96,60 @@ DIFFICULTY_SETTINGS = {
     },
 }
 
-TASK_ID_TO_DIFFICULTY = {
-    "easy": "easy",
-    "medium": "medium",
-    "hard": "hard",
-    "restock": "medium",
-    "recovery": "hard",
-}
-
 class HospitalWard:
-    def __init__(self, ward_id: str, difficulty: str, rng: random.Random, specialty: str):
+    def __init__(
+        self,
+        ward_id: str,
+        difficulty: str,
+        rng: random.Random,
+        specialty: str,
+        *,
+        clinical_mode: bool = False,
+    ):
         self.ward_id = ward_id
         self.difficulty = difficulty
         self._rng = rng
         self.specialty = specialty
+        self._clinical_mode = clinical_mode
         self.patients = self._generate_initial_patients()
 
     def _sample_drug(self) -> str:
         weights = WARD_SPECIALTY_PROFILES.get(self.specialty, [1] * len(PRIMARY_DRUGS))
         return self._rng.choices(PRIMARY_DRUGS, weights=weights, k=1)[0]
 
+    def _sample_from_preferred(self, preferred_drugs: List[str] | None = None) -> str:
+        if not preferred_drugs:
+            return self._sample_drug()
+
+        base_weights = WARD_SPECIALTY_PROFILES.get(self.specialty, [1] * len(PRIMARY_DRUGS))
+        weighted_preferences = []
+        for drug in preferred_drugs:
+            if drug in PRIMARY_DRUGS:
+                weighted_preferences.append(
+                    base_weights[PRIMARY_DRUGS.index(drug)] + 2
+                )
+            else:
+                weighted_preferences.append(1)
+        return self._rng.choices(preferred_drugs, weights=weighted_preferences, k=1)[0]
+
     def _create_patient(
         self,
         patient_id: str,
         *,
         severity_range: tuple[float, float] = (0.2, 1.0),
+        preferred_drugs: List[str] | None = None,
     ) -> dict:
         severity = self._rng.uniform(*severity_range)
-        needed_drug = self._sample_drug()
+        needed_drug = self._sample_from_preferred(preferred_drugs)
         doses_needed = max(1, int(severity * 3))
+        allowed_substitute, _ = SUBSTITUTE_MAP.get(needed_drug, (None, 0))
+        requires_primary_drug = False
+        clinical_reason = None
+        if self._clinical_mode and allowed_substitute:
+            direct_only_probability = min(0.7, 0.15 + (severity * 0.45))
+            requires_primary_drug = self._rng.random() < direct_only_probability
+            if requires_primary_drug:
+                clinical_reason = self._rng.choice(["contraindication", "clinician_override"])
         return {
             "id": patient_id,
             "severity": round(severity, 2),
@@ -126,22 +157,39 @@ class HospitalWard:
             "doses_needed": doses_needed,
             "doses_received": 0,
             "stable_days": 0,
+            "requires_primary_drug": requires_primary_drug,
+            "contraindicated_substitute": allowed_substitute if requires_primary_drug else None,
+            "clinical_reason": clinical_reason,
         }
 
     def _generate_initial_patients(self) -> List[dict]:
         n = self._rng.randint(3, 8)
         return [self._create_patient(f"P{i}") for i in range(n)]
 
-    def new_arrivals(self, arrival_rate: float):
-        if self._rng.random() < arrival_rate:
+    def new_arrivals(
+        self,
+        arrival_rate: float,
+        *,
+        forced_count: int | None = None,
+        severity_range: tuple[float, float] = (0.3, 1.0),
+        preferred_drugs: List[str] | None = None,
+    ) -> int:
+        if forced_count is None:
+            if self._rng.random() >= arrival_rate:
+                return 0
             n_new = self._rng.randint(1, 3)
-            for i in range(n_new):
-                self.patients.append(
-                    self._create_patient(
-                        f"NEW_{uuid.uuid4().hex[:4]}",
-                        severity_range=(0.3, 1.0),
-                    )
+        else:
+            n_new = max(0, int(forced_count))
+
+        for _ in range(n_new):
+            self.patients.append(
+                self._create_patient(
+                    f"NEW_{uuid.uuid4().hex[:4]}",
+                    severity_range=severity_range,
+                    preferred_drugs=preferred_drugs,
                 )
+            )
+        return n_new
 
     def add_surge_patients(self, count: int):
         for _ in range(count):
@@ -155,6 +203,14 @@ class HospitalWard:
     @property
     def priority_weight(self) -> float:
         return WARD_PRIORITY_MULTIPLIERS.get(self.specialty, 1.0)
+
+    def compute_direct_only_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for patient in self.patients:
+            if patient.get("requires_primary_drug"):
+                drug = patient["drug"]
+                counts[drug] = counts.get(drug, 0) + 1
+        return counts
 
     def compute_drug_needs(self) -> Dict[str, int]:
         needs = {}
@@ -187,6 +243,7 @@ class HospitalWard:
                 remaining_doses[drug] = given - actual_given
 
             penalty = 0.0
+            clinical_gap_penalty = 0.0
             # Check if substitute was used
             allowed_substitute, side_effect = SUBSTITUTE_MAP.get(drug, (None, 0))
             requested_substitute = substitutions.get(drug)
@@ -195,17 +252,22 @@ class HospitalWard:
                 and allowed_substitute
                 and requested_substitute == allowed_substitute
             ):
-                sub_given = remaining_doses.get(allowed_substitute, 0)
-                actual_sub = min(sub_given, needed - actual_given)
-                if actual_sub:
-                    remaining_doses[allowed_substitute] = sub_given - actual_sub
-                actual_given += actual_sub
-                penalty = side_effect * (actual_sub / needed) if needed > 0 else 0
+                if not p.get("requires_primary_drug"):
+                    sub_given = remaining_doses.get(allowed_substitute, 0)
+                    actual_sub = min(sub_given, needed - actual_given)
+                    if actual_sub:
+                        remaining_doses[allowed_substitute] = sub_given - actual_sub
+                    actual_given += actual_sub
+                    penalty = side_effect * (actual_sub / needed) if needed > 0 else 0
+                else:
+                    clinical_gap_penalty += 0.08
 
             p["doses_received"] = actual_given
             ratio = (actual_given / needed) if needed > 0 else 1.0
             ratio = min(ratio, 1.0)
-            score_contribution = (ratio - penalty) * p["severity"]
+            if p.get("requires_primary_drug") and ratio < 1.0:
+                clinical_gap_penalty += 0.12 * (1.0 - ratio)
+            score_contribution = (ratio - penalty - clinical_gap_penalty) * p["severity"]
             weighted_score += score_contribution
 
         ward_score = weighted_score / total_weight if total_weight > 0 else 0.0
@@ -255,6 +317,7 @@ class HospitalWard:
             "patient_count": len(self.patients),
             "severity_scores": [p["severity"] for p in self.patients],
             "drug_needs": self.compute_drug_needs(),
+            "direct_only_counts": self.compute_direct_only_counts(),
             "drug_received": drug_received,
             "patients": [
                 {
@@ -263,6 +326,9 @@ class HospitalWard:
                     "drug": p["drug"],
                     "doses_needed": p["doses_needed"],
                     "doses_received": p["doses_received"],
+                    "requires_primary_drug": p.get("requires_primary_drug", False),
+                    "contraindicated_substitute": p.get("contraindicated_substitute"),
+                    "clinical_reason": p.get("clinical_reason"),
                 }
                 for p in sorted(
                     self.patients,
@@ -290,6 +356,11 @@ class HospitalDrugEnvironment(Environment):
         self._scheduled_event_day: int | None = None
         self._event_type: str | None = None
         self._event_applied = False
+        self._task_id = "medium"
+        self._clinical_mode = False
+        self._forecast_mode = False
+        self._latent_demand_plan: Dict[str, dict] = {}
+        self._forecast_summary: Dict[str, dict] = {}
 
     def reset(
         self,
@@ -300,6 +371,9 @@ class HospitalDrugEnvironment(Environment):
         **kwargs,
     ) -> DrugShortageObservation:
         self._rng = random.Random(seed)
+        self._task_id = task_id or difficulty
+        self._clinical_mode = self._task_id in CLINICAL_CONSTRAINT_TASKS
+        self._forecast_mode = self._task_id in UNCERTAIN_DEMAND_TASKS
 
         if task_id in TASK_ID_TO_DIFFICULTY:
             difficulty = TASK_ID_TO_DIFFICULTY[task_id]
@@ -336,12 +410,14 @@ class HospitalDrugEnvironment(Environment):
                 self._difficulty,
                 self._rng,
                 specialties[i % len(specialties)],
+                clinical_mode=self._clinical_mode,
             )
             for i in range(num_wards)
         ]
 
         # Generate first incoming shipment
         self._incoming_shipments = self._generate_shipment()
+        self._generate_next_day_demand_plan()
 
         self._state = DrugShortageState(
             episode_id=episode_id or str(uuid.uuid4()),
@@ -360,10 +436,22 @@ class HospitalDrugEnvironment(Environment):
             budget_remaining=self._budget,
             inventory=dict(self._inventory),
             incoming_shipments=dict(self._incoming_shipments),
-            wards=[w.to_dict() for w in self._wards],
+            wards=self._build_ward_observations(),
             patient_outcomes={},
             total_score=self._total_score,
-            message=f"Day 1 of {self._settings['total_days']}. Allocate drugs to wards.",
+            message=(
+                f"Day 1 of {self._settings['total_days']}. Allocate drugs to wards."
+                + (
+                    " Some patients require the primary drug only; substitutes may be contraindicated."
+                    if self._clinical_mode
+                    else ""
+                )
+                + (
+                    " Tomorrow's demand is uncertain; use ward forecast bands instead of assuming exact arrivals."
+                    if self._forecast_mode
+                    else ""
+                )
+            ),
         )
 
     def step(self, action: DrugShortageAction, timeout_s=None, **kwargs) -> DrugShortageObservation:
@@ -454,11 +542,29 @@ class HospitalDrugEnvironment(Environment):
             discharged_patients += ward.advance_day()
 
         # 6. New patient arrivals
-        for ward in self._wards:
-            ward.new_arrivals(self._settings["patient_arrival_rate"])
+        if self._forecast_mode:
+            for ward in self._wards:
+                plan = self._latent_demand_plan.get(
+                    ward.ward_id,
+                    {
+                        "arrival_count": 0,
+                        "severity_range": (0.3, 0.8),
+                        "preferred_drugs": None,
+                    },
+                )
+                ward.new_arrivals(
+                    self._settings["patient_arrival_rate"],
+                    forced_count=plan["arrival_count"],
+                    severity_range=plan["severity_range"],
+                    preferred_drugs=plan["preferred_drugs"],
+                )
+        else:
+            for ward in self._wards:
+                ward.new_arrivals(self._settings["patient_arrival_rate"])
 
         # 7. Next shipment (stochastic)
         self._incoming_shipments = self._generate_shipment()
+        self._generate_next_day_demand_plan()
 
         # 8. Optional hard-mode disruption event
         event_message = self._apply_scheduled_event()
@@ -491,10 +597,24 @@ class HospitalDrugEnvironment(Environment):
                     f" Pressure hotspot: {top_ward['ward_id']} ({top_ward['specialty']}) "
                     f"score={top_ward['pressure_score']:.2f}."
                 )
+                if top_ward.get("direct_only_count", 0) > 0:
+                    message += (
+                        f" Direct-only patients there: {top_ward['direct_only_count']}."
+                    )
             if top_shortage:
                 message += (
                     f" Largest projected shortfall: {top_shortage['drug']} "
                     f"missing {top_shortage['shortfall']}."
+                )
+            if pressure_summary.get("direct_only_total", 0) > 0:
+                message += (
+                    f" Hospital direct-only patients: {pressure_summary['direct_only_total']}."
+                )
+            if self._forecast_mode and pressure_summary.get("forecast_hotspots"):
+                hotspot = pressure_summary["forecast_hotspots"][0]
+                message += (
+                    f" Forecast hotspot: {hotspot['ward_id']} "
+                    f"risk={hotspot['risk_band']} drugs={hotspot['priority_drugs']}."
                 )
             if scheduled_emergency_arrivals:
                 message += (
@@ -515,7 +635,7 @@ class HospitalDrugEnvironment(Environment):
             budget_remaining=round(self._budget, 2),
             inventory=dict(self._inventory),
             incoming_shipments=dict(self._incoming_shipments),
-            wards=[w.to_dict() for w in self._wards],
+            wards=self._build_ward_observations(),
             patient_outcomes=patient_outcomes,
             total_score=round(self._total_score, 3),
             message=message,
@@ -545,12 +665,16 @@ class HospitalDrugEnvironment(Environment):
             ward_need_total = sum(needs.values())
             severity_total = sum(patient["severity"] for patient in ward.patients)
             pressure_score = round(ward.priority_weight * severity_total, 3)
+            direct_only_count = sum(
+                1 for patient in ward.patients if patient.get("requires_primary_drug")
+            )
             ward_pressure.append(
                 {
                     "ward_id": ward.ward_id,
                     "specialty": ward.specialty,
                     "pressure_score": pressure_score,
                     "need_total": ward_need_total,
+                    "direct_only_count": direct_only_count,
                 }
             )
             for drug, qty in needs.items():
@@ -576,7 +700,89 @@ class HospitalDrugEnvironment(Environment):
         return {
             "top_wards": ward_pressure[:2],
             "top_shortages": shortage_alerts[:3],
+            "direct_only_total": sum(
+                1 for ward in self._wards for patient in ward.patients if patient.get("requires_primary_drug")
+            ),
+            "forecast_hotspots": sorted(
+                self._forecast_summary.values(),
+                key=lambda item: (item.get("risk_rank", 0), item.get("upper_bound", 0)),
+                reverse=True,
+            )[:2]
+            if self._forecast_mode
+            else [],
         }
+
+    def _top_specialty_drugs(self, specialty: str, limit: int = 2) -> List[str]:
+        weights = WARD_SPECIALTY_PROFILES.get(specialty, [1] * len(PRIMARY_DRUGS))
+        ranked = sorted(
+            zip(PRIMARY_DRUGS, weights),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [drug for drug, _ in ranked[:limit]]
+
+    def _generate_next_day_demand_plan(self) -> None:
+        self._latent_demand_plan = {}
+        self._forecast_summary = {}
+        if not self._forecast_mode:
+            return
+
+        for ward in self._wards:
+            severity_total = sum(patient["severity"] for patient in ward.patients)
+            pressure_factor = min(0.25, severity_total / max(len(ward.patients), 1) * 0.15)
+            risk_roll = self._rng.random() + pressure_factor + ((ward.priority_weight - 1.0) * 0.5)
+
+            if risk_roll > 1.0:
+                risk_band = "high"
+                lower_bound, upper_bound = 2, 4
+                severity_range = (0.55, 1.0)
+                risk_rank = 3
+            elif risk_roll > 0.62:
+                risk_band = "medium"
+                lower_bound, upper_bound = 1, 3
+                severity_range = (0.35, 0.9)
+                risk_rank = 2
+            else:
+                risk_band = "low"
+                lower_bound, upper_bound = 0, 1
+                severity_range = (0.25, 0.75)
+                risk_rank = 1
+
+            arrival_count = self._rng.randint(lower_bound, upper_bound)
+            priority_drugs = self._top_specialty_drugs(ward.specialty)
+
+            self._latent_demand_plan[ward.ward_id] = {
+                "arrival_count": arrival_count,
+                "severity_range": severity_range,
+                "preferred_drugs": priority_drugs,
+            }
+            self._forecast_summary[ward.ward_id] = {
+                "ward_id": ward.ward_id,
+                "risk_band": risk_band,
+                "risk_rank": risk_rank,
+                "expected_new_patients_band": {
+                    "min": lower_bound,
+                    "max": upper_bound,
+                },
+                "upper_bound": upper_bound,
+                "priority_drugs": priority_drugs,
+            }
+
+    def _build_ward_observations(self) -> List[dict]:
+        payloads = []
+        for ward in self._wards:
+            ward_payload = ward.to_dict()
+            if self._forecast_mode:
+                ward_payload["demand_forecast"] = self._forecast_summary.get(
+                    ward.ward_id,
+                    {
+                        "risk_band": "low",
+                        "expected_new_patients_band": {"min": 0, "max": 1},
+                        "priority_drugs": self._top_specialty_drugs(ward.specialty),
+                    },
+                )
+            payloads.append(ward_payload)
+        return payloads
 
     def _apply_scheduled_event(self) -> str | None:
         if (

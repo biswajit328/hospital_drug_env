@@ -36,6 +36,8 @@ across multiple hospital wards, keeping the most critical patients alive first.
 - **Budget constraints** - emergency orders cost 10x normal price
 - **Procurement delay** - emergency orders are guaranteed but only arrive for the next day
 - **Substitute drugs** - available but with side effect penalties
+- **Clinical override constraints** - some patients require the primary drug only, so substitutes are not universally safe
+- **Partial observability** - uncertainty-aware tasks expose only ward-level demand forecasts for tomorrow instead of exact future arrivals
 - **New patients arrive** each day - resource pressure increases over time
 - **Patient progression** - untreated patients deteriorate, stable patients can recover and be discharged
 - **Rare hard-mode disruptions** - shipment failures or sudden patient surges increase decision difficulty
@@ -117,21 +119,25 @@ This makes the benchmark sequential rather than one-shot: every daily decision c
 
 ## Task Suite
 
-The environment exposes three deterministic grader-backed tasks. They are not just
-"the same task with three labels"; each task emphasizes a different hospital
-operations objective and uses a different policy/grader setup.
+The environment now exposes five deterministic grader-backed tasks. They are not just
+"the same task with more labels"; the suite mixes core scarcity-management tasks
+with orthogonal clinical-constraint and planning-under-uncertainty task families.
 
 | Task | Difficulty | Objective | Key Challenge |
 |------|------------|-----------|---------------|
 | Critical Care Stabilization | Easy | Keep service levels high with reliable supply and prioritize the sickest wards first | Strong basic triage and clean state handling |
 | Budget-Constrained Ward Balancing | Medium | Preserve outcomes while limiting overspend on emergency procurement | Trade off scarcity against budget discipline |
 | Substitution-Aware Surge Response | Hard | Maintain coverage during prolonged shortages with limited budget and substitute drugs | Long-horizon scarcity, substitutions, and surge arrivals |
+| Clinical Override Triage | Hard | Reserve direct stock for contraindicated patients who cannot safely take substitutes | Clinical validity changes allocation order |
+| Forecast-Aware Reserve Planning | Hard | Plan under uncertain next-day demand using risk bands instead of exact future arrivals | Reason under partial observability rather than full information |
 
 ### Grader Policy Styles
 
 - **Critical Care Stabilization**: severity-aware ward balancing without emergency procurement
 - **Budget-Constrained Ward Balancing**: budget-aware balancing with selective emergency ordering
 - **Substitution-Aware Surge Response**: severity-first triage with substitutions and disruption recovery
+- **Clinical Override Triage**: constraint-aware triage with selective substitute deferral
+- **Forecast-Aware Reserve Planning**: reserve planning under uncertain future demand
 
 ## Why Weak Agents Fail
 
@@ -192,7 +198,9 @@ Expected output:
 
 ```json
 {
-  "easy": 0.95,
+  "clinical": 0.528,
+  "easy": 0.99,
+  "forecast": 0.545,
   "hard": 0.528,
   "medium": 0.897
 }
@@ -203,6 +211,20 @@ Interpretation:
 - **Easy / Critical Care Stabilization**: near-perfect score under favorable supply
 - **Medium / Budget-Constrained Ward Balancing**: strong performance with selective emergency ordering and budget discipline
 - **Hard / Substitution-Aware Surge Response**: clearly harder because it mixes scarcity, substitutions, patient deterioration, and rare disruption events
+- **Clinical Override Triage**: tests whether the policy can separate substitute-eligible from direct-only patients
+- **Forecast-Aware Reserve Planning**: tests whether the policy can preserve inventory under uncertain future demand
+
+Run the contract audit locally:
+
+```bash
+python contract_check.py
+```
+
+This verifies that:
+
+- the benchmark registry and `openenv.yaml` describe the same task suite
+- all tasks expose graders
+- all grader scores remain strictly inside `(0.0, 1.0)`
 
 ## What This Benchmark Evaluates Well
 
@@ -223,7 +245,7 @@ It combines several hospital-specific pressures that interact over time:
 - **Service-line priority**: some ward specialties are more operationally sensitive than others
 - **Supply uncertainty**: tomorrow's inventory is not guaranteed
 - **Budget pressure**: emergency rescue options exist, but overspending is punished
-- **Clinical substitutes**: alternative drugs can help, but only with explicit penalties
+- **Clinical substitutes**: alternative drugs can help, but only with explicit penalties and now not every patient can safely receive them
 - **Stateful patient progression**: today's under-treatment worsens tomorrow's hospital state
 
 That combination is what makes the environment useful for evaluating real planning quality rather than one-step greedy heuristics.
@@ -244,7 +266,41 @@ That combination is what makes the environment useful for evaluating real planni
 - recognize when infectious-disease or respiratory pressure should dominate the plan
 - anticipate future deterioration instead of optimizing only the current day
 - use substitutions selectively when they improve net hospital outcomes
+- reserve direct stock for clinically constrained patients instead of assuming substitutes are globally valid
 - treat emergency orders as a last-resort rescue tool, not a default action
+
+## Orthogonal Clinical Constraint Task
+
+The benchmark now includes an orthogonal task family, **Clinical Override Triage**, where some patients are marked as direct-drug-only because a substitute is contraindicated or blocked by clinician override.
+
+This changes the reasoning mode:
+
+- substitute drugs are no longer universally interchangeable
+- observation includes ward-level `direct_only_counts`
+- patient records expose `requires_primary_drug`
+- the agent must reserve direct stock for constrained patients and use substitutes only for clinically eligible cases
+
+This is more than a scarcity increase. It creates a structurally different planning problem because a naive "use substitutes everywhere" strategy now fails on medically constrained cases.
+
+## Orthogonal Partial-Observability Task
+
+The benchmark also now includes **Forecast-Aware Reserve Planning**, where the agent does not get exact next-day demand. Instead, each ward exposes:
+
+- a `risk_band` such as low / medium / high
+- an `expected_new_patients_band`
+- likely `priority_drugs`
+
+The hidden next-day arrivals are sampled from that latent forecast plan. That means the agent must reserve stock for likely future spikes instead of greedily exhausting inventory on the current day.
+
+This changes the reasoning mode from:
+
+- fully reactive allocation
+
+to:
+
+- planning under uncertainty with inventory reserves and probabilistic demand signals
+
+That makes the benchmark more realistic because real hospital operations rarely know tomorrow's exact patient inflow in advance.
 
 ## API Usage
 ```python
@@ -313,7 +369,7 @@ pip install git+https://huggingface.co/spaces/biswajit328/hospital-drug-env
    - highest-risk ward
    - pressure hotspot
    - projected shortfall
-5. Explain that the same environment supports three benchmark tasks:
+5. Explain that the same environment supports multiple benchmark tasks:
    - stabilization
    - budget-constrained balancing
    - surge-response under disruption

@@ -39,24 +39,23 @@ tasks:
     success_threshold: 0.45
     grader: true
     has_grader: true
-  - id: restock
-    name: Selective Restock Planning
-    difficulty: medium
-    description: >
-      Protect medium-term ward coverage by anticipating projected shortages
-      and using restrained emergency restocking only when it materially
-      improves future service continuity.
-    max_steps: 7
-    success_threshold: 0.72
-    grader: true
-    has_grader: true
-  - id: recovery
-    name: Cold Chain Recovery
+  - id: clinical
+    name: Clinical Override Triage
     difficulty: hard
     description: >
-      Recover service levels after disruption by combining triage, delayed
-      emergency restocking, and selective substitutions during prolonged scarcity.
+      Protect direct-drug-only patients by reserving scarce primary stock for
+      contraindicated cases and using substitutes only where clinically valid.
     max_steps: 10
-    success_threshold: 0.42
+    success_threshold: 0.46
+    grader: true
+    has_grader: true
+  - id: forecast
+    name: Forecast-Aware Reserve Planning
+    difficulty: hard
+    description: >
+      Plan under uncertain future demand by using ward-level risk bands and
+      likely-drug forecasts rather than exact next-day patient arrivals.
+    max_steps: 10
+    success_threshold: 0.46
     grader: true
     has_grader: true
