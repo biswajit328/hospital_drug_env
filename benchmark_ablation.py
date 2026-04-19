@@ -56,7 +56,7 @@ def run_variant_scores(task_ids: List[str], base_seeds: List[int]) -> dict:
 
         for task_id in task_ids:
             config = builder(TASKS[task_id])
-            seed_scores = [run_task_score(config, base_seed=seed) for seed in base_seeds]
+            seed_scores = [run_task_score(config, base_seed=seed, task_id=task_id) for seed in base_seeds]
             per_seed_scores[task_id] = [round(score, 3) for score in seed_scores]
             task_scores[task_id] = round(sum(seed_scores) / len(seed_scores), 3)
 

@@ -15,6 +15,7 @@ from grader import (
     grade_easy,
     grade_forecast,
     grade_hard,
+    grade_logistics,
     grade_medium,
     run_all_graders,
 )
@@ -27,6 +28,7 @@ GRADERS = {
     "hard": grade_hard,
     "clinical": grade_clinical,
     "forecast": grade_forecast,
+    "logistics": grade_logistics,
 }
 
 # Extra conventional aliases for simplistic validator lookups.
@@ -35,6 +37,7 @@ grade_task_medium = grade_medium
 grade_task_hard = grade_hard
 grade_task_clinical = grade_clinical
 grade_task_forecast = grade_forecast
+grade_task_logistics = grade_logistics
 
 
 def list_tasks() -> list[dict]:

@@ -59,3 +59,13 @@ tasks:
     success_threshold: 0.46
     grader: true
     has_grader: true
+  - id: logistics
+    name: Perishable Supply Chain Coordination
+    difficulty: hard
+    description: >
+      Manage perishable drug inventory under cold-chain limits, uncertain
+      shipment reliability, and variable emergency-order lead times.
+    max_steps: 10
+    success_threshold: 0.40
+    grader: true
+    has_grader: true

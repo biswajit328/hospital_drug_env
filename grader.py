@@ -185,9 +185,20 @@ def choose_emergency_orders(
     shortages: Dict[str, dict],
     budget_remaining: float,
     config: TaskConfig,
+    *,
+    observation=None,
 ) -> List[str]:
     emergency_orders: List[str] = []
     remaining_budget = budget_remaining
+    pending_supply = {
+        shipment["drug"]: 0
+        for shipment in (observation.pending_orders if observation is not None else [])
+    }
+    if observation is not None:
+        for shipment in observation.pending_orders:
+            pending_supply[shipment["drug"]] = (
+                pending_supply.get(shipment["drug"], 0) + int(shipment.get("qty", 0))
+            )
 
     ranked_shortages = sorted(
         shortages.items(),
@@ -200,7 +211,36 @@ def choose_emergency_orders(
     )
 
     for drug, shortage in ranked_shortages:
-        if shortage["max_severity"] < config.critical_threshold:
+        threshold = config.critical_threshold
+        if config.use_logistics_controls and observation is not None:
+            supplier = observation.supplier_status.get(drug, {})
+            lead_time = supplier.get("lead_time_band", {})
+            reliability_band = supplier.get("reliability_band", "medium")
+            expiring_stock = (
+                observation.inventory_risk.get(drug, {}).get("expiring_within_2_days", 0)
+                if observation.inventory_risk
+                else 0
+            )
+            cold_chain_pressure = observation.storage_status.get("overflow_risk")
+
+            if reliability_band == "low":
+                threshold -= 0.14
+            elif reliability_band == "medium":
+                threshold -= 0.06
+            if int(lead_time.get("max_days", 1)) >= 3:
+                threshold -= 0.05
+            if expiring_stock > 0:
+                threshold += 0.03
+            if (
+                supplier.get("storage_class") == "cold_chain"
+                and cold_chain_pressure == "high"
+                and shortage["max_severity"] < 0.92
+            ):
+                threshold += 0.05
+
+        if shortage["max_severity"] < threshold:
+            continue
+        if pending_supply.get(drug, 0) >= shortage["total_unmet"]:
             continue
 
         emergency_cost = DRUG_COSTS.get(drug, 500) * 10
@@ -276,8 +316,9 @@ def build_action(observation, config: TaskConfig) -> DrugShortageAction:
             shortages,
             observation.budget_remaining,
             config,
+            observation=observation,
         )
-        if emergency_orders:
+        if emergency_orders and not config.use_logistics_controls:
             augmented_inventory = dict(observation.inventory)
             for drug in emergency_orders:
                 augmented_inventory[drug] = augmented_inventory.get(drug, 0) + 20
@@ -306,13 +347,15 @@ def build_action(observation, config: TaskConfig) -> DrugShortageAction:
     )
 
 
-def run_episode(config: TaskConfig, seed: int = 42) -> float:
+def run_episode(config: TaskConfig, seed: int = 42, *, task_id: str | None = None) -> float:
     """
     Run one full episode with a deterministic task-specific policy.
     Returns a normalized score in the 0.0-1.0 range.
     """
     env = HospitalDrugEnvironment()
-    observation = env.reset(difficulty=config.difficulty, seed=seed)
+    if task_id is None:
+        task_id = next(task_name for task_name, task in TASKS.items() if task == config)
+    observation = env.reset(task_id=task_id, difficulty=config.difficulty, seed=seed)
 
     done = False
     while not done:
@@ -324,9 +367,9 @@ def run_episode(config: TaskConfig, seed: int = 42) -> float:
     return clamp_validator_safe_score(raw_score)
 
 
-def run_task_score(config: TaskConfig, base_seed: int = 42) -> float:
+def run_task_score(config: TaskConfig, base_seed: int = 42, *, task_id: str | None = None) -> float:
     seeds = [base_seed, base_seed + 1]
-    scores = [run_episode(config, seed=seed) for seed in seeds]
+    scores = [run_episode(config, seed=seed, task_id=task_id) for seed in seeds]
     score = sum(scores) / len(scores)
     if not 0.0 <= score <= 1.0:
         raise ValueError(f"Task score out of range for {config.name}: {score}")
@@ -336,7 +379,7 @@ def run_task_score(config: TaskConfig, base_seed: int = 42) -> float:
 def grade_easy(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 1 - Critical Care Stabilization."""
     config = TASKS["easy"]
-    score = run_task_score(config, base_seed=seed)
+    score = run_task_score(config, base_seed=seed, task_id="easy")
     if verbose:
         stream = stream or sys.stderr
         print_task_header(config, seed, stream=stream)
@@ -347,7 +390,7 @@ def grade_easy(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
 def grade_medium(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 2 - Budget-Constrained Ward Balancing."""
     config = TASKS["medium"]
-    score = run_task_score(config, base_seed=seed)
+    score = run_task_score(config, base_seed=seed, task_id="medium")
     if verbose:
         stream = stream or sys.stderr
         print_task_header(config, seed, stream=stream)
@@ -358,7 +401,7 @@ def grade_medium(seed: int = 42, *, verbose: bool = False, stream=None) -> float
 def grade_hard(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 3 - Substitution-Aware Surge Response."""
     config = TASKS["hard"]
-    score = run_task_score(config, base_seed=seed)
+    score = run_task_score(config, base_seed=seed, task_id="hard")
     if verbose:
         stream = stream or sys.stderr
         print_task_header(config, seed, stream=stream)
@@ -369,7 +412,7 @@ def grade_hard(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
 def grade_clinical(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 4 - Clinical Override Triage."""
     config = TASKS["clinical"]
-    score = run_task_score(config, base_seed=seed)
+    score = run_task_score(config, base_seed=seed, task_id="clinical")
     if verbose:
         stream = stream or sys.stderr
         print_task_header(config, seed, stream=stream)
@@ -380,7 +423,18 @@ def grade_clinical(seed: int = 42, *, verbose: bool = False, stream=None) -> flo
 def grade_forecast(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
     """Task 5 - Forecast-Aware Reserve Planning."""
     config = TASKS["forecast"]
-    score = run_task_score(config, base_seed=seed)
+    score = run_task_score(config, base_seed=seed, task_id="forecast")
+    if verbose:
+        stream = stream or sys.stderr
+        print_task_header(config, seed, stream=stream)
+        print(f"Score: {score:.3f}", file=stream)
+    return score
+
+
+def grade_logistics(seed: int = 42, *, verbose: bool = False, stream=None) -> float:
+    """Task 6 - Perishable Supply Chain Coordination."""
+    config = TASKS["logistics"]
+    score = run_task_score(config, base_seed=seed, task_id="logistics")
     if verbose:
         stream = stream or sys.stderr
         print_task_header(config, seed, stream=stream)
@@ -401,6 +455,7 @@ def run_all_graders(seed: int = 42, *, verbose: bool = False, stream=None) -> di
         "hard": grade_hard(seed=seed, verbose=verbose, stream=stream),
         "clinical": grade_clinical(seed=seed, verbose=verbose, stream=stream),
         "forecast": grade_forecast(seed=seed, verbose=verbose, stream=stream),
+        "logistics": grade_logistics(seed=seed, verbose=verbose, stream=stream),
     }
 
     if verbose:
@@ -418,7 +473,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--difficulty",
-        choices=["easy", "medium", "hard", "clinical", "forecast", "all"],
+        choices=["easy", "medium", "hard", "clinical", "forecast", "logistics", "all"],
         default="all",
     )
     parser.add_argument("--seed", type=int, default=42)

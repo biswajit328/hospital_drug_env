@@ -8,6 +8,7 @@ from openenv.core.env_server import Environment
 try:
     from hospital_drug_env.benchmark_registry import (
         CLINICAL_CONSTRAINT_TASKS,
+        LOGISTICS_REALISM_TASKS,
         TASK_ID_TO_DIFFICULTY,
         UNCERTAIN_DEMAND_TASKS,
     )
@@ -18,7 +19,12 @@ try:
         DrugShortageState,
     )
 except ModuleNotFoundError:
-    from benchmark_registry import CLINICAL_CONSTRAINT_TASKS, TASK_ID_TO_DIFFICULTY, UNCERTAIN_DEMAND_TASKS
+    from benchmark_registry import (
+        CLINICAL_CONSTRAINT_TASKS,
+        LOGISTICS_REALISM_TASKS,
+        TASK_ID_TO_DIFFICULTY,
+        UNCERTAIN_DEMAND_TASKS,
+    )
     from score_utils import clamp_validator_safe_score
     from models import (
         DrugShortageAction,
@@ -52,6 +58,32 @@ SUBSTITUTE_DRUGS = sorted(
     substitute for substitute, _ in SUBSTITUTE_MAP.values() if substitute is not None
 )
 ALL_DRUGS = PRIMARY_DRUGS + SUBSTITUTE_DRUGS
+COLD_CHAIN_DRUGS = {"remdesivir", "insulin"}
+DRUG_SHELF_LIFE = {
+    "amoxicillin": 4,
+    "remdesivir": 2,
+    "paracetamol": 5,
+    "insulin": 3,
+    "morphine": 4,
+    "azithromycin": 4,
+    "ibuprofen": 5,
+    "tramadol": 4,
+}
+COLD_CHAIN_CAPACITY_BY_DIFFICULTY = {
+    "easy": 38,
+    "medium": 28,
+    "hard": 22,
+}
+SUPPLIER_BASE_PROFILES = {
+    "amoxicillin": {"reliability": 0.82, "lead_time_band": (1, 2)},
+    "remdesivir": {"reliability": 0.55, "lead_time_band": (2, 3)},
+    "paracetamol": {"reliability": 0.9, "lead_time_band": (1, 2)},
+    "insulin": {"reliability": 0.62, "lead_time_band": (2, 3)},
+    "morphine": {"reliability": 0.68, "lead_time_band": (1, 2)},
+    "azithromycin": {"reliability": 0.76, "lead_time_band": (1, 2)},
+    "ibuprofen": {"reliability": 0.88, "lead_time_band": (1, 2)},
+    "tramadol": {"reliability": 0.72, "lead_time_band": (1, 2)},
+}
 
 WARD_SPECIALTY_PROFILES = {
     "general_medicine": [3, 1, 4, 2, 1],
@@ -359,8 +391,13 @@ class HospitalDrugEnvironment(Environment):
         self._task_id = "medium"
         self._clinical_mode = False
         self._forecast_mode = False
+        self._logistics_mode = False
         self._latent_demand_plan: Dict[str, dict] = {}
         self._forecast_summary: Dict[str, dict] = {}
+        self._inventory_lots: Dict[str, List[dict]] = {}
+        self._pending_shipments: List[dict] = []
+        self._supplier_status: Dict[str, dict] = {}
+        self._storage_status: Dict[str, int | float | str] = {}
 
     def reset(
         self,
@@ -374,6 +411,7 @@ class HospitalDrugEnvironment(Environment):
         self._task_id = task_id or difficulty
         self._clinical_mode = self._task_id in CLINICAL_CONSTRAINT_TASKS
         self._forecast_mode = self._task_id in UNCERTAIN_DEMAND_TASKS
+        self._logistics_mode = self._task_id in LOGISTICS_REALISM_TASKS
 
         if task_id in TASK_ID_TO_DIFFICULTY:
             difficulty = TASK_ID_TO_DIFFICULTY[task_id]
@@ -386,6 +424,10 @@ class HospitalDrugEnvironment(Environment):
         self._event_applied = False
         self._scheduled_event_day = None
         self._event_type = None
+        self._inventory_lots = {drug: [] for drug in ALL_DRUGS}
+        self._pending_shipments = []
+        self._supplier_status = {}
+        self._storage_status = {}
         if self._difficulty == "hard":
             self._scheduled_event_day = self._rng.randint(3, self._settings["total_days"] - 1)
             self._event_type = self._rng.choice(
@@ -400,6 +442,14 @@ class HospitalDrugEnvironment(Environment):
         }
         for drug in SUBSTITUTE_DRUGS:
             self._inventory[drug] = int(self._rng.randint(3, 10) * max(0.5, multiplier))
+
+        if self._logistics_mode:
+            seeded_inventory = dict(self._inventory)
+            self._inventory = {drug: 0 for drug in ALL_DRUGS}
+            self._roll_supplier_status()
+            for drug, qty in seeded_inventory.items():
+                self._receive_inventory(drug, qty, source="initial")
+            self._refresh_inventory_totals()
 
         # Initialize wards
         num_wards = self._settings["num_wards"]
@@ -416,7 +466,12 @@ class HospitalDrugEnvironment(Environment):
         ]
 
         # Generate first incoming shipment
-        self._incoming_shipments = self._generate_shipment()
+        if self._logistics_mode:
+            self._schedule_base_shipments()
+            self._incoming_shipments = self._summarize_incoming_shipments()
+            self._storage_status = self._build_storage_status(overflow_units=0)
+        else:
+            self._incoming_shipments = self._generate_shipment()
         self._generate_next_day_demand_plan()
 
         self._state = DrugShortageState(
@@ -439,6 +494,10 @@ class HospitalDrugEnvironment(Environment):
             wards=self._build_ward_observations(),
             patient_outcomes={},
             total_score=self._total_score,
+            inventory_risk=self._build_inventory_risk(),
+            supplier_status=dict(self._supplier_status),
+            pending_orders=self._build_pending_orders_view(),
+            storage_status=dict(self._storage_status),
             message=(
                 f"Day 1 of {self._settings['total_days']}. Allocate drugs to wards."
                 + (
@@ -449,6 +508,11 @@ class HospitalDrugEnvironment(Environment):
                 + (
                     " Tomorrow's demand is uncertain; use ward forecast bands instead of assuming exact arrivals."
                     if self._forecast_mode
+                    else ""
+                )
+                + (
+                    " Logistics mode is active: shelf life, cold-chain capacity, and variable supplier lead times now matter."
+                    if self._logistics_mode
                     else ""
                 )
             ),
@@ -479,6 +543,7 @@ class HospitalDrugEnvironment(Environment):
         weighted_outcome_sum = 0.0
         highest_risk_ward = None
         highest_risk_gap = -1.0
+        consumed_by_drug: Dict[str, int] = {}
 
         for ward in self._wards:
             ward_alloc = action.allocations.get(ward.ward_id, {})
@@ -490,6 +555,7 @@ class HospitalDrugEnvironment(Environment):
                 available = remaining_inventory.get(drug, 0)
                 actual = min(requested_doses, available)
                 final_alloc[drug] = actual
+                consumed_by_drug[drug] = consumed_by_drug.get(drug, 0) + actual
                 remaining_inventory[drug] = available - actual
                 rejected_doses += requested_doses - actual
 
@@ -506,7 +572,12 @@ class HospitalDrugEnvironment(Environment):
                 highest_risk_gap = ward_risk_gap
                 highest_risk_ward = ward.ward_id
 
-        self._inventory = remaining_inventory
+        if self._logistics_mode:
+            for drug, qty in consumed_by_drug.items():
+                self._consume_inventory(drug, qty)
+            self._refresh_inventory_totals()
+        else:
+            self._inventory = remaining_inventory
 
         # 3. Compute day reward (severity-weighted hospital score with small operational penalties)
         weighted_outcome = (
@@ -524,17 +595,41 @@ class HospitalDrugEnvironment(Environment):
             0.05,
             emergency_spend / max(self._settings["budget"], 1) * 0.05,
         )
-        day_score = max(
+        base_day_score = max(
             0.0,
             min(1.0, weighted_outcome - inefficiency_penalty - waste_penalty - emergency_penalty),
         )
-        self._total_score += day_score
 
         # 4. Receive normal and emergency shipments for the next day
-        for drug, qty in self._incoming_shipments.items():
-            self._inventory[drug] = self._inventory.get(drug, 0) + qty
-        for drug, qty in scheduled_emergency_arrivals.items():
-            self._inventory[drug] = self._inventory.get(drug, 0) + qty
+        delivered_shipments: Dict[str, int] = {}
+        spoilage_report: Dict[str, int] = {}
+        overflow_report: Dict[str, int] = {}
+        logistics_penalty = 0.0
+        if self._logistics_mode:
+            if scheduled_emergency_arrivals:
+                self._queue_emergency_orders(scheduled_emergency_arrivals)
+            delivered_shipments = self._advance_pending_shipments()
+            spoilage_report = self._age_inventory()
+            overflow_report = self._apply_cold_chain_overflow()
+            spoiled_units = sum(spoilage_report.values()) + sum(overflow_report.values())
+            logistics_penalty = min(
+                0.06,
+                spoiled_units / max(total_requested_doses + sum(self._inventory.values()), 1) * 0.08,
+            )
+            self._roll_supplier_status()
+            self._schedule_base_shipments()
+            self._incoming_shipments = self._summarize_incoming_shipments()
+            self._storage_status = self._build_storage_status(
+                overflow_units=sum(overflow_report.values())
+            )
+        else:
+            for drug, qty in self._incoming_shipments.items():
+                self._inventory[drug] = self._inventory.get(drug, 0) + qty
+            for drug, qty in scheduled_emergency_arrivals.items():
+                self._inventory[drug] = self._inventory.get(drug, 0) + qty
+
+        day_score = max(0.0, min(1.0, base_day_score - logistics_penalty))
+        self._total_score += day_score
 
         # 5. Advance patient health state
         discharged_patients = 0
@@ -563,7 +658,8 @@ class HospitalDrugEnvironment(Environment):
                 ward.new_arrivals(self._settings["patient_arrival_rate"])
 
         # 7. Next shipment (stochastic)
-        self._incoming_shipments = self._generate_shipment()
+        if not self._logistics_mode:
+            self._incoming_shipments = self._generate_shipment()
         self._generate_next_day_demand_plan()
 
         # 8. Optional hard-mode disruption event
@@ -617,9 +713,25 @@ class HospitalDrugEnvironment(Environment):
                     f"risk={hotspot['risk_band']} drugs={hotspot['priority_drugs']}."
                 )
             if scheduled_emergency_arrivals:
+                if self._logistics_mode:
+                    message += (
+                        f" Emergency orders queued with variable lead times: "
+                        f"{scheduled_emergency_arrivals}."
+                    )
+                else:
+                    message += (
+                        f" Emergency arrivals queued for next day: "
+                        f"{scheduled_emergency_arrivals}."
+                    )
+            if self._logistics_mode and delivered_shipments:
+                message += f" Delivered overnight: {delivered_shipments}."
+            if self._logistics_mode and spoilage_report:
+                message += f" Expired overnight: {spoilage_report}."
+            if self._logistics_mode and overflow_report:
+                message += f" Cold-chain overflow loss: {overflow_report}."
+            if self._logistics_mode and self._storage_status.get("overflow_risk") == "high":
                 message += (
-                    f" Emergency arrivals queued for next day: "
-                    f"{scheduled_emergency_arrivals}."
+                    " Cold-chain storage is near capacity; remdesivir and insulin orders must be timed carefully."
                 )
             if event_message:
                 message += f" Event: {event_message}"
@@ -638,6 +750,10 @@ class HospitalDrugEnvironment(Environment):
             wards=self._build_ward_observations(),
             patient_outcomes=patient_outcomes,
             total_score=round(self._total_score, 3),
+            inventory_risk=self._build_inventory_risk(),
+            supplier_status=dict(self._supplier_status),
+            pending_orders=self._build_pending_orders_view(),
+            storage_status=dict(self._storage_status),
             message=message,
         )
 
@@ -655,6 +771,327 @@ class HospitalDrugEnvironment(Environment):
             if self._rng.random() < reliability * 0.7:
                 shipment[drug] = self._rng.randint(2, 8)
         return shipment
+
+    def _receive_inventory(
+        self,
+        drug: str,
+        qty: int,
+        *,
+        source: str,
+        days_to_expiry: int | None = None,
+    ) -> None:
+        qty = max(0, int(qty))
+        if qty <= 0:
+            return
+
+        if not self._logistics_mode:
+            self._inventory[drug] = self._inventory.get(drug, 0) + qty
+            return
+
+        shelf_life = max(1, int(days_to_expiry or DRUG_SHELF_LIFE.get(drug, 4)))
+        self._inventory_lots.setdefault(drug, []).append(
+            {
+                "qty": qty,
+                "days_to_expiry": shelf_life,
+                "source": source,
+            }
+        )
+        self._refresh_inventory_totals()
+
+    def _refresh_inventory_totals(self) -> None:
+        if not self._logistics_mode:
+            return
+        self._inventory = {
+            drug: sum(lot["qty"] for lot in self._inventory_lots.get(drug, []))
+            for drug in ALL_DRUGS
+        }
+
+    def _consume_inventory(self, drug: str, qty: int) -> None:
+        if not self._logistics_mode:
+            self._inventory[drug] = max(0, self._inventory.get(drug, 0) - max(0, int(qty)))
+            return
+
+        remaining = max(0, int(qty))
+        lots = sorted(
+            self._inventory_lots.get(drug, []),
+            key=lambda lot: lot["days_to_expiry"],
+        )
+        updated_lots = []
+        for lot in lots:
+            if remaining <= 0:
+                updated_lots.append(lot)
+                continue
+            take = min(remaining, lot["qty"])
+            lot["qty"] -= take
+            remaining -= take
+            if lot["qty"] > 0:
+                updated_lots.append(lot)
+        self._inventory_lots[drug] = updated_lots
+        self._refresh_inventory_totals()
+
+    def _build_inventory_risk(self) -> Dict[str, dict]:
+        if not self._logistics_mode:
+            return {}
+
+        inventory_risk: Dict[str, dict] = {}
+        for drug in ALL_DRUGS:
+            lots = self._inventory_lots.get(drug, [])
+            expiring_1 = sum(lot["qty"] for lot in lots if lot["days_to_expiry"] <= 1)
+            expiring_2 = sum(lot["qty"] for lot in lots if lot["days_to_expiry"] <= 2)
+            if expiring_1 or expiring_2 or self._inventory.get(drug, 0) > 0:
+                inventory_risk[drug] = {
+                    "on_hand": self._inventory.get(drug, 0),
+                    "expiring_within_1_day": expiring_1,
+                    "expiring_within_2_days": expiring_2,
+                    "storage_class": "cold_chain" if drug in COLD_CHAIN_DRUGS else "standard",
+                }
+        return inventory_risk
+
+    def _roll_supplier_status(self) -> None:
+        if not self._logistics_mode:
+            self._supplier_status = {}
+            return
+
+        difficulty_penalty = {"easy": 0.0, "medium": 0.04, "hard": 0.08}[self._difficulty]
+        supplier_status: Dict[str, dict] = {}
+        for drug in ALL_DRUGS:
+            base_profile = SUPPLIER_BASE_PROFILES.get(
+                drug,
+                {"reliability": 0.75, "lead_time_band": (1, 2)},
+            )
+            reliability_score = min(
+                0.95,
+                max(
+                    0.35,
+                    base_profile["reliability"] - difficulty_penalty + self._rng.uniform(-0.06, 0.06),
+                ),
+            )
+            reliability_band = (
+                "high"
+                if reliability_score >= 0.78
+                else "medium"
+                if reliability_score >= 0.6
+                else "low"
+            )
+            lead_min, lead_max = base_profile["lead_time_band"]
+            if reliability_band == "low":
+                lead_max += 1
+            elif reliability_band == "high" and lead_min > 1:
+                lead_min -= 1
+            supplier_status[drug] = {
+                "reliability_band": reliability_band,
+                "reliability_score": round(reliability_score, 2),
+                "lead_time_band": {
+                    "min_days": lead_min,
+                    "max_days": lead_max,
+                },
+                "storage_class": "cold_chain" if drug in COLD_CHAIN_DRUGS else "standard",
+            }
+        self._supplier_status = supplier_status
+
+    def _schedule_shipment(self, drug: str, qty: int, *, eta: int, source: str) -> None:
+        qty = max(0, int(qty))
+        eta = max(1, int(eta))
+        if qty <= 0:
+            return
+
+        status = self._supplier_status.get(drug) or {
+            "reliability_band": "medium",
+            "reliability_score": 0.75,
+            "lead_time_band": {"min_days": 1, "max_days": 2},
+            "storage_class": "standard",
+        }
+        shelf_life = DRUG_SHELF_LIFE.get(drug, 4)
+        if drug in COLD_CHAIN_DRUGS and source != "initial" and self._rng.random() < 0.4:
+            shelf_life = max(1, shelf_life - 1)
+
+        self._pending_shipments.append(
+            {
+                "drug": drug,
+                "requested_qty": qty,
+                "eta": eta,
+                "source": source,
+                "reliability_band": status["reliability_band"],
+                "reliability_score": float(status["reliability_score"]),
+                "lead_time_band": dict(status["lead_time_band"]),
+                "days_to_expiry": shelf_life,
+            }
+        )
+
+    def _schedule_base_shipments(self) -> None:
+        if not self._logistics_mode:
+            return
+
+        for drug in ALL_DRUGS:
+            on_hand = self._inventory.get(drug, 0)
+            target_inventory = 12 if drug in PRIMARY_DRUGS else 6
+            if on_hand >= target_inventory and self._rng.random() < 0.5:
+                continue
+
+            status = self._supplier_status[drug]
+            reliability_score = float(status["reliability_score"])
+            plan_probability = min(0.95, 0.25 + reliability_score * 0.75)
+            if self._rng.random() > plan_probability:
+                continue
+
+            qty_low, qty_high = ((5, 16) if drug in PRIMARY_DRUGS else (2, 7))
+            planned_qty = self._rng.randint(qty_low, qty_high)
+            lead_min = status["lead_time_band"]["min_days"]
+            lead_max = status["lead_time_band"]["max_days"]
+            eta = self._rng.randint(lead_min, lead_max)
+            self._schedule_shipment(drug, planned_qty, eta=eta, source="routine")
+
+    def _summarize_incoming_shipments(self) -> Dict[str, int]:
+        if not self._logistics_mode:
+            return dict(self._incoming_shipments)
+
+        summary: Dict[str, int] = {}
+        for shipment in self._pending_shipments:
+            if shipment["eta"] == 1:
+                drug = shipment["drug"]
+                summary[drug] = summary.get(drug, 0) + shipment["requested_qty"]
+        return summary
+
+    def _build_pending_orders_view(self) -> List[dict]:
+        if not self._logistics_mode:
+            return []
+
+        return sorted(
+            [
+                {
+                    "drug": shipment["drug"],
+                    "qty": shipment["requested_qty"],
+                    "eta": shipment["eta"],
+                    "source": shipment["source"],
+                    "reliability_band": shipment["reliability_band"],
+                    "lead_time_band": shipment["lead_time_band"],
+                }
+                for shipment in self._pending_shipments
+            ],
+            key=lambda shipment: (shipment["eta"], shipment["drug"], shipment["source"]),
+        )
+
+    def _queue_emergency_orders(self, emergency_orders: Dict[str, int]) -> None:
+        if not self._logistics_mode:
+            return
+
+        for drug, qty in emergency_orders.items():
+            status = self._supplier_status.get(drug)
+            if not status:
+                continue
+            eta = self._rng.randint(
+                status["lead_time_band"]["min_days"],
+                status["lead_time_band"]["max_days"],
+            )
+            self._schedule_shipment(drug, qty, eta=eta, source="emergency")
+
+    def _sample_delivery_quantity(self, shipment: dict) -> int:
+        requested_qty = int(shipment["requested_qty"])
+        reliability_score = float(shipment["reliability_score"])
+        lower = max(0.35, reliability_score - 0.25)
+        upper = min(1.0, reliability_score + 0.08)
+        fill_ratio = self._rng.uniform(lower, upper)
+        delivered_qty = max(0, int(round(requested_qty * fill_ratio)))
+        if shipment["reliability_band"] == "low" and self._rng.random() < 0.2:
+            delivered_qty = max(0, delivered_qty - self._rng.randint(1, max(1, requested_qty // 3)))
+        return delivered_qty
+
+    def _advance_pending_shipments(self) -> Dict[str, int]:
+        if not self._logistics_mode:
+            return {}
+
+        delivered: Dict[str, int] = {}
+        remaining_shipments: List[dict] = []
+        for shipment in self._pending_shipments:
+            shipment["eta"] -= 1
+            if shipment["eta"] <= 0:
+                delivered_qty = self._sample_delivery_quantity(shipment)
+                if delivered_qty > 0:
+                    self._receive_inventory(
+                        shipment["drug"],
+                        delivered_qty,
+                        source=shipment["source"],
+                        days_to_expiry=shipment["days_to_expiry"],
+                    )
+                    delivered[shipment["drug"]] = delivered.get(shipment["drug"], 0) + delivered_qty
+                continue
+            remaining_shipments.append(shipment)
+
+        self._pending_shipments = remaining_shipments
+        self._refresh_inventory_totals()
+        return delivered
+
+    def _age_inventory(self) -> Dict[str, int]:
+        if not self._logistics_mode:
+            return {}
+
+        spoiled: Dict[str, int] = {}
+        for drug in ALL_DRUGS:
+            updated_lots = []
+            for lot in self._inventory_lots.get(drug, []):
+                lot["days_to_expiry"] -= 1
+                if lot["days_to_expiry"] <= 0:
+                    spoiled[drug] = spoiled.get(drug, 0) + lot["qty"]
+                    continue
+                updated_lots.append(lot)
+            self._inventory_lots[drug] = updated_lots
+        self._refresh_inventory_totals()
+        return spoiled
+
+    def _apply_cold_chain_overflow(self) -> Dict[str, int]:
+        if not self._logistics_mode:
+            return {}
+
+        capacity = COLD_CHAIN_CAPACITY_BY_DIFFICULTY[self._difficulty]
+        current_load = sum(self._inventory.get(drug, 0) for drug in COLD_CHAIN_DRUGS)
+        overflow = max(0, current_load - capacity)
+        if overflow <= 0:
+            return {}
+
+        spoiled: Dict[str, int] = {}
+        cold_chain_lots = []
+        for drug in COLD_CHAIN_DRUGS:
+            for lot in self._inventory_lots.get(drug, []):
+                cold_chain_lots.append((drug, lot))
+        cold_chain_lots.sort(key=lambda item: item[1]["days_to_expiry"])
+
+        remaining_overflow = overflow
+        for drug, lot in cold_chain_lots:
+            if remaining_overflow <= 0:
+                break
+            lost = min(remaining_overflow, lot["qty"])
+            lot["qty"] -= lost
+            spoiled[drug] = spoiled.get(drug, 0) + lost
+            remaining_overflow -= lost
+
+        for drug in COLD_CHAIN_DRUGS:
+            self._inventory_lots[drug] = [
+                lot for lot in self._inventory_lots.get(drug, []) if lot["qty"] > 0
+            ]
+        self._refresh_inventory_totals()
+        return spoiled
+
+    def _build_storage_status(self, *, overflow_units: int) -> Dict[str, int | float | str]:
+        if not self._logistics_mode:
+            return {}
+
+        capacity = COLD_CHAIN_CAPACITY_BY_DIFFICULTY[self._difficulty]
+        load = sum(self._inventory.get(drug, 0) for drug in COLD_CHAIN_DRUGS)
+        utilization = (load / capacity) if capacity > 0 else 0.0
+        overflow_risk = (
+            "high"
+            if utilization >= 0.9
+            else "medium"
+            if utilization >= 0.7
+            else "low"
+        )
+        return {
+            "cold_chain_load": load,
+            "cold_chain_capacity": capacity,
+            "utilization": round(utilization, 2),
+            "overflow_units": overflow_units,
+            "overflow_risk": overflow_risk,
+        }
 
     def _summarize_operational_pressure(self) -> dict:
         ward_pressure = []

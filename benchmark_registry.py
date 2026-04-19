@@ -17,6 +17,7 @@ class TaskConfig:
     max_emergency_orders_per_day: int
     respect_direct_only_constraints: bool
     use_forecast_reserve: bool
+    use_logistics_controls: bool
     family: str
     reasoning_mode: str
     observation_regime: str
@@ -38,6 +39,7 @@ TASKS: Dict[str, TaskConfig] = {
         max_emergency_orders_per_day=0,
         respect_direct_only_constraints=False,
         use_forecast_reserve=False,
+        use_logistics_controls=False,
         family="stabilization",
         reasoning_mode="reactive triage",
         observation_regime="fully observed",
@@ -57,6 +59,7 @@ TASKS: Dict[str, TaskConfig] = {
         max_emergency_orders_per_day=1,
         respect_direct_only_constraints=False,
         use_forecast_reserve=False,
+        use_logistics_controls=False,
         family="resource balancing",
         reasoning_mode="budget-constrained planning",
         observation_regime="fully observed",
@@ -76,6 +79,7 @@ TASKS: Dict[str, TaskConfig] = {
         max_emergency_orders_per_day=2,
         respect_direct_only_constraints=False,
         use_forecast_reserve=False,
+        use_logistics_controls=False,
         family="scarcity adaptation",
         reasoning_mode="long-horizon scarcity planning",
         observation_regime="fully observed",
@@ -95,6 +99,7 @@ TASKS: Dict[str, TaskConfig] = {
         max_emergency_orders_per_day=2,
         respect_direct_only_constraints=True,
         use_forecast_reserve=False,
+        use_logistics_controls=False,
         family="clinical constraints",
         reasoning_mode="constraint-aware triage",
         observation_regime="fully observed",
@@ -114,9 +119,31 @@ TASKS: Dict[str, TaskConfig] = {
         max_emergency_orders_per_day=2,
         respect_direct_only_constraints=False,
         use_forecast_reserve=True,
+        use_logistics_controls=False,
         family="partial observability",
         reasoning_mode="uncertainty-aware reserve planning",
         observation_regime="partially observed",
+    ),
+    "logistics": TaskConfig(
+        name="Perishable Supply Chain Coordination",
+        difficulty="hard",
+        objective=(
+            "Protect outcomes when cold-chain capacity, shelf life, uncertain shipment "
+            "reliability, and variable emergency lead times force earlier procurement "
+            "and tighter use of perishable stock."
+        ),
+        policy_style="Perishable-inventory planning with stochastic procurement timing",
+        allocation_mode="severity_first",
+        use_substitutions=True,
+        allow_emergency_orders=True,
+        critical_threshold=0.74,
+        max_emergency_orders_per_day=2,
+        respect_direct_only_constraints=False,
+        use_forecast_reserve=False,
+        use_logistics_controls=True,
+        family="supply chain realism",
+        reasoning_mode="perishable inventory and lead-time planning",
+        observation_regime="supplier-risk observed",
     ),
 }
 
@@ -126,6 +153,7 @@ TASK_MAX_STEPS: Dict[str, int] = {
     "hard": 10,
     "clinical": 10,
     "forecast": 10,
+    "logistics": 10,
 }
 
 TASK_SUCCESS_THRESHOLDS: Dict[str, float] = {
@@ -134,6 +162,7 @@ TASK_SUCCESS_THRESHOLDS: Dict[str, float] = {
     "hard": 0.45,
     "clinical": 0.46,
     "forecast": 0.46,
+    "logistics": 0.40,
 }
 
 TASK_ID_TO_DIFFICULTY: Dict[str, str] = {
@@ -159,6 +188,11 @@ UNCERTAIN_DEMAND_TASKS = {
     task_id
     for task_id, config in TASKS.items()
     if config.observation_regime == "partially observed"
+}
+LOGISTICS_REALISM_TASKS = {
+    task_id
+    for task_id, config in TASKS.items()
+    if config.use_logistics_controls
 }
 
 

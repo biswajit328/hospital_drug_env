@@ -45,6 +45,10 @@ class DrugShortageObservation(Observation):
     wards: List[dict]
     patient_outcomes: Dict[str, float]
     total_score: float
+    inventory_risk: Dict[str, dict] = Field(default_factory=dict)
+    supplier_status: Dict[str, dict] = Field(default_factory=dict)
+    pending_orders: List[dict] = Field(default_factory=list)
+    storage_status: Dict[str, Any] = Field(default_factory=dict)
     message: str
 
 class DrugShortageState(State):

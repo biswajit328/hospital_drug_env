@@ -85,6 +85,10 @@ Strategy:
 - If a patient is marked as direct-only, do not assume the substitute is safe for them.
 - Some tasks only provide forecast bands for tomorrow's demand rather than exact future arrivals.
 - Use inventory reserves when a ward has a high-risk demand forecast.
+- Some tasks expose per-drug spoilage risk, cold-chain storage pressure, and pending orders with variable lead times.
+- If stock is expiring soon, use it before it spoils.
+- If supplier reliability is low or lead times are long, order earlier instead of waiting for a crisis.
+- Avoid over-ordering cold-chain drugs when storage capacity is already tight.
 """
 
 PROXY_HEALTHCHECK_PROMPT = "Reply with OK."
@@ -133,6 +137,10 @@ def format_observation(obs, step) -> str:
         f"Budget remaining: {obs.budget_remaining}",
         f"Inventory: {json.dumps(obs.inventory)}",
         f"Incoming tomorrow: {json.dumps(obs.incoming_shipments)}",
+        f"Inventory risk: {json.dumps(obs.inventory_risk)}",
+        f"Supplier status: {json.dumps(obs.supplier_status)}",
+        f"Pending orders: {json.dumps(obs.pending_orders)}",
+        f"Storage status: {json.dumps(obs.storage_status)}",
         "Emergency orders placed today arrive tomorrow.",
         f"Valid substitutions: {json.dumps(SUBSTITUTE_OPTIONS)}",
         "Wards:",
@@ -236,10 +244,14 @@ def allocate_greedily(patient_needs: List[dict], inventory: dict) -> tuple[dict,
 def plan_emergency_orders(
     unmet_by_drug: dict,
     budget_remaining: float,
+    observation,
     max_orders: int = 2,
 ) -> List[str]:
     emergency_orders: List[str] = []
     remaining_budget = budget_remaining
+    pending_supply = {}
+    for shipment in getattr(observation, "pending_orders", []) or []:
+        pending_supply[shipment["drug"]] = pending_supply.get(shipment["drug"], 0) + int(shipment.get("qty", 0))
 
     for drug, shortage in sorted(
         unmet_by_drug.items(),
@@ -251,7 +263,23 @@ def plan_emergency_orders(
         reverse=True,
     ):
         cost = EMERGENCY_ORDER_COSTS.get(drug, 5000)
-        if shortage["max_severity"] < 0.9 or remaining_budget < cost:
+        threshold = 0.9
+        supplier = (getattr(observation, "supplier_status", {}) or {}).get(drug, {})
+        if supplier.get("reliability_band") == "low":
+            threshold -= 0.14
+        elif supplier.get("reliability_band") == "medium":
+            threshold -= 0.06
+        if int((supplier.get("lead_time_band") or {}).get("max_days", 1)) >= 3:
+            threshold -= 0.05
+        if pending_supply.get(drug, 0) >= shortage["total_unmet"]:
+            continue
+        if (
+            supplier.get("storage_class") == "cold_chain"
+            and (getattr(observation, "storage_status", {}) or {}).get("overflow_risk") == "high"
+            and shortage["max_severity"] < 0.92
+        ):
+            threshold += 0.05
+        if shortage["max_severity"] < threshold or remaining_budget < cost:
             continue
         emergency_orders.append(drug)
         remaining_budget -= cost
@@ -307,6 +335,7 @@ def fallback_action(observation) -> DrugShortageAction:
     emergency_orders = plan_emergency_orders(
         unmet_by_drug,
         observation.budget_remaining,
+        observation,
     )
     if emergency_orders:
         for drug in emergency_orders:

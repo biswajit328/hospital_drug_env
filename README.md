@@ -38,6 +38,9 @@ across multiple hospital wards, keeping the most critical patients alive first.
 - **Substitute drugs** - available but with side effect penalties
 - **Clinical override constraints** - some patients require the primary drug only, so substitutes are not universally safe
 - **Partial observability** - uncertainty-aware tasks expose only ward-level demand forecasts for tomorrow instead of exact future arrivals
+- **Perishable inventory realism** - some tasks track shelf life, spoilage risk, and expiring stock that should be used before it is lost
+- **Cold-chain storage pressure** - remdesivir and insulin can overflow limited refrigerated capacity if procurement is mistimed
+- **Variable procurement timing** - supplier lead times and delivered quantities become stochastic in the logistics task
 - **New patients arrive** each day - resource pressure increases over time
 - **Patient progression** - untreated patients deteriorate, stable patients can recover and be discharged
 - **Rare hard-mode disruptions** - shipment failures or sudden patient surges increase decision difficulty
@@ -119,9 +122,9 @@ This makes the benchmark sequential rather than one-shot: every daily decision c
 
 ## Task Suite
 
-The environment now exposes five deterministic grader-backed tasks. They are not just
+The environment now exposes six deterministic grader-backed tasks. They are not just
 "the same task with more labels"; the suite mixes core scarcity-management tasks
-with orthogonal clinical-constraint and planning-under-uncertainty task families.
+with orthogonal clinical-constraint, planning-under-uncertainty, and supply-logistics task families.
 
 | Task | Difficulty | Objective | Key Challenge |
 |------|------------|-----------|---------------|
@@ -130,6 +133,7 @@ with orthogonal clinical-constraint and planning-under-uncertainty task families
 | Substitution-Aware Surge Response | Hard | Maintain coverage during prolonged shortages with limited budget and substitute drugs | Long-horizon scarcity, substitutions, and surge arrivals |
 | Clinical Override Triage | Hard | Reserve direct stock for contraindicated patients who cannot safely take substitutes | Clinical validity changes allocation order |
 | Forecast-Aware Reserve Planning | Hard | Plan under uncertain next-day demand using risk bands instead of exact future arrivals | Reason under partial observability rather than full information |
+| Perishable Supply Chain Coordination | Hard | Manage shelf life, cold-chain limits, and uncertain procurement timing | Use expiring stock first and order before supplier delays become catastrophic |
 
 ### Grader Policy Styles
 
@@ -138,6 +142,7 @@ with orthogonal clinical-constraint and planning-under-uncertainty task families
 - **Substitution-Aware Surge Response**: severity-first triage with substitutions and disruption recovery
 - **Clinical Override Triage**: constraint-aware triage with selective substitute deferral
 - **Forecast-Aware Reserve Planning**: reserve planning under uncertain future demand
+- **Perishable Supply Chain Coordination**: perishable-inventory planning with stochastic procurement timing
 
 ## Why Weak Agents Fail
 
@@ -198,10 +203,11 @@ Expected output:
 
 ```json
 {
-  "clinical": 0.528,
+  "clinical": 0.527,
   "easy": 0.99,
-  "forecast": 0.545,
+  "forecast": 0.481,
   "hard": 0.528,
+  "logistics": 0.404,
   "medium": 0.897
 }
 ```
@@ -213,6 +219,7 @@ Interpretation:
 - **Hard / Substitution-Aware Surge Response**: clearly harder because it mixes scarcity, substitutions, patient deterioration, and rare disruption events
 - **Clinical Override Triage**: tests whether the policy can separate substitute-eligible from direct-only patients
 - **Forecast-Aware Reserve Planning**: tests whether the policy can preserve inventory under uncertain future demand
+- **Perishable Supply Chain Coordination**: tests whether the policy orders earlier for risky suppliers, avoids cold-chain overflow, and uses expiring stock before spoilage
 
 Run the contract audit locally:
 
@@ -234,6 +241,9 @@ This verifies that:
 - Budget-aware intervention timing
 - Delayed procurement planning under uncertainty
 - Safe substitute usage under scarcity
+- Perishable inventory usage before spoilage
+- Procurement timing under uncertain supplier reliability
+- Cold-chain storage discipline for temperature-sensitive drugs
 - Robustness to sudden operational shocks
 
 ## Why This Is More Than A Generic Allocation Simulator
@@ -246,6 +256,9 @@ It combines several hospital-specific pressures that interact over time:
 - **Supply uncertainty**: tomorrow's inventory is not guaranteed
 - **Budget pressure**: emergency rescue options exist, but overspending is punished
 - **Clinical substitutes**: alternative drugs can help, but only with explicit penalties and now not every patient can safely receive them
+- **Perishable inventory**: some stock has to be consumed before it expires, which changes how aggressively the agent should preserve or spend inventory
+- **Cold-chain storage**: temperature-sensitive drugs cannot be overstocked indefinitely without incurring overflow loss
+- **Supplier uncertainty**: procurement timing and fill rates become part of the planning problem instead of a fixed next-day guarantee
 - **Stateful patient progression**: today's under-treatment worsens tomorrow's hospital state
 
 That combination is what makes the environment useful for evaluating real planning quality rather than one-step greedy heuristics.
@@ -302,6 +315,23 @@ to:
 
 That makes the benchmark more realistic because real hospital operations rarely know tomorrow's exact patient inflow in advance.
 
+## Orthogonal Supply-Logistics Task
+
+The benchmark now also includes **Perishable Supply Chain Coordination**, where the agent must manage:
+
+- `inventory_risk` showing which drugs are expiring within one or two days
+- `supplier_status` with reliability bands and lead-time ranges
+- `pending_orders` that may arrive after one to three days instead of a fixed next-day guarantee
+- `storage_status` showing cold-chain load and overflow risk
+
+This changes the reasoning mode again:
+
+- emergency procurement can no longer be treated as a guaranteed next-day rescue
+- expiring stock should be consumed before new stock is ordered
+- remdesivir and insulin orders must respect refrigerated storage limits
+
+That forces a different policy class: perishable-inventory planning instead of pure severity triage.
+
 ## API Usage
 ```python
 from hospital_drug_env.client import HospitalDrugEnv
@@ -357,6 +387,7 @@ pip install git+https://huggingface.co/spaces/biswajit328/hospital-drug-env
 - The reward is not binary; it gives useful partial credit while still punishing waste, overspend, and bad prioritization.
 - Hard mode is not just "less inventory" - it mixes scarcity, patient progression, substitutions, and seeded disruptions.
 - The benchmark differentiates weak and strong agents in clinically meaningful ways, especially around triage, substitutes, and budget timing.
+- The logistics task adds a genuinely different strategy regime: shelf life, storage pressure, and variable supplier timing.
 - The system is deployable and reproducible end-to-end: Docker, Hugging Face Space, local validation, live validation, grader, and baseline inference all work.
 
 ## Suggested 60-Second Demo Flow
