@@ -451,7 +451,7 @@ The baseline script:
 - uses the OpenAI client with `API_BASE_URL`, `MODEL_NAME`, and the injected `HF_TOKEN` / `API_KEY`
 - performs a startup connectivity check through the injected LiteLLM/OpenAI-compatible proxy before stepping the environment
 - can target either a live Space via `SPACE_URL` or a local image via `LOCAL_IMAGE_NAME`
-- emits structured stdout logs with `[START]`, `[STEP]`, and `[END]` markers for validator-friendly parsing
+- emits structured stdout logs with `[START]`, `[STEP]`, and `[END]` markers for validator friendly parsing
 - falls back to a deterministic heuristic planner only when the model returns malformed action JSON
 
 ## Built With
