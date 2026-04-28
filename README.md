@@ -381,7 +381,7 @@ pip install git+https://huggingface.co/spaces/biswajit328/hospital-drug-env
 - Service-critical wards are weighted more heavily, reflecting operational triage pressure in real hospitals
 - Captures the tradeoff between immediate rescue decisions and long-term hospital resilience
 
-## What Judges Should Notice
+## Key Design Strengths
 
 - The environment is **stateful**, not one-shot: poor allocations create worse future hospital states.
 - The reward is not binary; it gives useful partial credit while still punishing waste, overspend, and bad prioritization.
